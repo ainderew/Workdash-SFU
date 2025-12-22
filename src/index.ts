@@ -16,6 +16,8 @@ import {
 } from "./middleware/socket-auth.middleware.js";
 import { UserRepository } from "./repositories/user/user.repository.js";
 import authRoutes from "./routes/auth.route.js";
+import characterRoutes from "./routes/character.route.js";
+import { httpAuthMiddleware } from "./middleware/http-auth.middlware.js";
 dotenv.config();
 
 const app = express();
@@ -23,6 +25,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use("/api/auth", authRoutes);
+app.use("/api/character", httpAuthMiddleware, characterRoutes);
 
 const server = new http.Server(app);
 const io = new Server(server, {
