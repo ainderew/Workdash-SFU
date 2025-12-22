@@ -4,13 +4,25 @@ import http from "http";
 import cors from "cors";
 import mediasoup from "mediasoup";
 import dotenv from "dotenv";
-import { ChatService } from "./Services/ChatService.js";
-import { ReactionService } from "./Services/ReactionService.js";
-import { FocusModeService } from "./Services/FocusModeService.js";
+import type { Character } from "@prisma/client";
+import { ChatService } from "./services/chat.service.js";
+import { ReactionService } from "./services/reaction.service.js";
+import { FocusModeService } from "./services/focusMode.service.js";
+import { GameService } from "./services/game.service.js";
+import { GameEventEnums } from "./services/_enums.js";
+import {
+  socketAuthMiddleware,
+  type AuthenticatedSocket,
+} from "./middleware/socket-auth.middleware.js";
+import { UserRepository } from "./repositories/user/user.repository.js";
+import authRoutes from "./routes/auth.route.js";
 dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", authRoutes);
 
 const server = new http.Server(app);
 const io = new Server(server, {
@@ -19,9 +31,15 @@ const io = new Server(server, {
   },
 });
 
+// Apply JWT authentication middleware to all socket connections
+io.use(socketAuthMiddleware);
+
 export type User = {
+  userId: number;
   name: string;
+  email: string;
   isInFocusMode: boolean;
+  character: Character;
 };
 
 let router: mediasoup.types.Router | undefined;
@@ -113,37 +131,74 @@ async function startServer() {
   workers.push(worker);
   router = createdRouter;
 
-  io.on("connection", (socket: Socket) => {
+  io.on("connection", async (socket: Socket) => {
+    const authSocket = socket as AuthenticatedSocket;
+
+    console.log("Client connected:", socket.id, "User ID:", authSocket.userId);
+
+    // Load full user + character from DB
+    // THIS AWAIT CAUSED THE RACE CONDITION
+    const userRepository = new UserRepository();
+    const userWithCharacter = await userRepository.findByIdWithCharacter(
+      authSocket.userId,
+    );
+
+    if (!userWithCharacter || !userWithCharacter.character) {
+      console.error(
+        "User or character not found for authenticated user:",
+        authSocket.userId,
+      );
+      socket.disconnect();
+      return;
+    }
+
+    // Populate userMap with complete data
+    userMap[socket.id] = {
+      userId: userWithCharacter.id,
+      name: userWithCharacter.name || "Player",
+      email: userWithCharacter.email,
+      isInFocusMode: false,
+      character: userWithCharacter.character,
+    };
+
+    console.log("User added to userMap:", socket.id, userMap[socket.id]?.name);
+
+    // Initialize services
     const chatService = new ChatService(socket);
     const reactionService = new ReactionService(socket);
     const focusModeService = new FocusModeService(socket);
+    const gameService = new GameService(socket, authSocket.userId);
 
     chatService.listenForMessage();
     reactionService.listenForReactions();
     focusModeService.listenForFocusModeChange(userMap);
-
-    console.log("Client connected:", socket.id);
-
-    socket.on("setUserInfo", (userData) => {
-      console.log("SET USER INFO - - - -");
-      console.log(`Socket ${socket.id} set user info:`, userData);
-
-      userData.isInFocusMode = false;
-      userMap[socket.id] = userData;
-      console.log(userMap[socket.id]);
-    });
+    gameService.listenForGameEvents(userMap);
 
     // Initialize transport tracking for this socket
     socketTransports[socket.id] = [];
 
+    // --- MEDIASOUP LISTENERS ATTACHED HERE ---
+
     socket.on("getRouterRtpCapabilities", (_, callback) => {
-      if (!router) return;
+      console.log("getRouterRtpCapabilities requested by:", socket.id);
+
+      if (!router) {
+        console.error("Router not initialized!");
+        callback({ error: "Router not initialized" });
+        return;
+      }
+
+      console.log("Sending RTP capabilities to client");
       callback(router.rtpCapabilities);
     });
 
     socket.on("createTransport", async ({ type }, callback) => {
+      console.log(`createTransport (${type}) requested by:`, socket.id);
+
       if (!router) {
-        throw new Error("Router not initialized");
+        console.error("Router not initialized for createTransport!");
+        callback({ error: "Router not initialized" });
+        return;
       }
 
       const transport = await router.createWebRtcTransport({
@@ -335,9 +390,7 @@ async function startServer() {
 
     socket.on("producerClosed", (data) => {
       console.log("PRODUCER CLOSED", data);
-
       io.emit("endScreenShare", data);
-      // socket.broadcast.emit("endScreenShare", data);
     });
 
     socket.on("resumeConsumer", async ({ consumerId }, callback) => {
@@ -354,6 +407,15 @@ async function startServer() {
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
 
+      const user = userMap[socket.id];
+      if (user) {
+        socket.broadcast.emit(GameEventEnums.PLAYER_LEFT, {
+          playerId: socket.id,
+          userId: user.userId,
+        });
+      }
+      delete userMap[socket.id];
+
       const transportIds = socketTransports[socket.id] || [];
       transportIds.forEach((id) => {
         const transport = transports[id];
@@ -368,8 +430,6 @@ async function startServer() {
         if (transportIds.includes(data.transportId)) {
           data.producer.close();
           delete producers[id];
-
-          // Notify other clients that this producer is gone
           socket.broadcast.emit("producerClosed", { producerId: id });
         }
       });
@@ -381,6 +441,14 @@ async function startServer() {
         }
       });
     });
+
+    // --- CRITICAL CHANGE: NOTIFY CLIENT OF READINESS ---
+    // Only emit this after all await calls (DB fetch) are done
+    // and all listeners are attached.
+    console.log(
+      `Initialization complete for ${socket.id}, sending sfuInitialized`,
+    );
+    socket.emit("sfuInitialized");
   });
 
   server.listen(4000, () => {
