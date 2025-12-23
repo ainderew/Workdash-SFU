@@ -41,6 +41,7 @@ export type PlayerMovementData = {
   y: number;
   vx: number;
   vy: number;
+  isAttacking: boolean;
 };
 
 export type PlayerActionData = {

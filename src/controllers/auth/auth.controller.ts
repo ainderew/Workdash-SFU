@@ -16,7 +16,6 @@ export const syncGoogleUser = async (req: Request, res: Response) => {
 
     const user = await authService.syncGoogleUser(email, name);
 
-    // Generate JWT token
     const token = JwtUtil.sign({
       userId: user.id,
       email: user.email,

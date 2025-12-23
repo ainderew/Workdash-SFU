@@ -17,6 +17,7 @@ import {
 import { UserRepository } from "./repositories/user/user.repository.js";
 import authRoutes from "./routes/auth.route.js";
 import characterRoutes from "./routes/character.route.js";
+import userRoutes from "./routes/user.route.js";
 import { httpAuthMiddleware } from "./middleware/http-auth.middlware.js";
 dotenv.config();
 
@@ -26,6 +27,7 @@ app.use(express.json());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/character", httpAuthMiddleware, characterRoutes);
+app.use("/api/user", httpAuthMiddleware, userRoutes);
 
 const server = new http.Server(app);
 const io = new Server(server, {
@@ -34,7 +36,6 @@ const io = new Server(server, {
   },
 });
 
-// Apply JWT authentication middleware to all socket connections
 io.use(socketAuthMiddleware);
 
 export type User = {
@@ -49,19 +50,14 @@ let router: mediasoup.types.Router | undefined;
 const workers: mediasoup.types.Worker[] = [];
 
 const userMap: Record<string, User> = {};
-// Store transports by transport ID
 const transports: Record<string, mediasoup.types.WebRtcTransport> = {};
-
-// Reference for which transports belong to which socket
 const socketTransports: Record<string, string[]> = {};
 
-// Store producers by producer ID with their transport ID
 const producers: Record<
   string,
   { producer: mediasoup.types.Producer; transportId: string }
 > = {};
 
-// Store consumers by consumer ID with their transport ID
 const consumers: Record<
   string,
   { consumer: mediasoup.types.Consumer; transportId: string }
@@ -139,8 +135,6 @@ async function startServer() {
 
     console.log("Client connected:", socket.id, "User ID:", authSocket.userId);
 
-    // Load full user + character from DB
-    // THIS AWAIT CAUSED THE RACE CONDITION
     const userRepository = new UserRepository();
     const userWithCharacter = await userRepository.findByIdWithCharacter(
       authSocket.userId,
@@ -155,7 +149,6 @@ async function startServer() {
       return;
     }
 
-    // Populate userMap with complete data
     userMap[socket.id] = {
       userId: userWithCharacter.id,
       name: userWithCharacter.name || "Player",
@@ -166,7 +159,6 @@ async function startServer() {
 
     console.log("User added to userMap:", socket.id, userMap[socket.id]?.name);
 
-    // Initialize services
     const chatService = new ChatService(socket);
     const reactionService = new ReactionService(socket);
     const focusModeService = new FocusModeService(socket);
@@ -177,11 +169,9 @@ async function startServer() {
     focusModeService.listenForFocusModeChange(userMap);
     gameService.listenForGameEvents(userMap);
 
-    // Initialize transport tracking for this socket
     socketTransports[socket.id] = [];
 
     // --- MEDIASOUP LISTENERS ATTACHED HERE ---
-
     socket.on("getRouterRtpCapabilities", (_, callback) => {
       console.log("getRouterRtpCapabilities requested by:", socket.id);
 
@@ -211,7 +201,6 @@ async function startServer() {
         preferUdp: true,
       });
 
-      // Store transport by its ID and track which socket owns it
       transports[transport.id] = transport;
 
       if (!socketTransports[socket.id]) {
@@ -445,12 +434,6 @@ async function startServer() {
       });
     });
 
-    // --- CRITICAL CHANGE: NOTIFY CLIENT OF READINESS ---
-    // Only emit this after all await calls (DB fetch) are done
-    // and all listeners are attached.
-    console.log(
-      `Initialization complete for ${socket.id}, sending sfuInitialized`,
-    );
     socket.emit("sfuInitialized");
   });
 

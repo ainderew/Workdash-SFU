@@ -5,9 +5,9 @@ import type {
   PlayerState,
   PlayerMovementData,
   PlayerActionData,
-  CharacterUpdateData,
 } from "./_types.js";
 import { CharacterRepository } from "../repositories/character/character.repository.js";
+import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
 
 // In-memory player positions (Shared across all socket instances)
 const playerPositions: Map<string, PlayerState> = new Map();
@@ -31,17 +31,10 @@ export class GameService {
       this.socket.id,
     );
 
-    this.socket.onAny((eventName, ...args) => {
-      console.log(`[DEBUG] Received event: ${eventName}`);
-    });
-
-    // FIX: Listen for string "playerJoin" to match Multiplayer.joinGame()
     this.socket.on("playerJoin", (data: { x: number; y: number }) => {
-      console.log("PLAYER HAS JOINED !!!!!");
       this.handlePlayerJoin(data, userMap);
     });
 
-    // FIX: Listen for string "playerMovement"
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
       this.handlePlayerMovement(data);
     });
@@ -54,7 +47,7 @@ export class GameService {
     // Character Customization Update
     this.socket.on(
       GameEventEnums.PLAYER_UPDATE_CHARACTER,
-      async (data: CharacterUpdateData) => {
+      async (data: CharacterUpdateInput) => {
         await this.handleCharacterUpdate(data, userMap);
       },
     );
@@ -75,7 +68,6 @@ export class GameService {
       return;
     }
 
-    // Create player state
     const playerState: PlayerState = {
       id: this.socket.id,
       userId: user.userId,
@@ -88,7 +80,6 @@ export class GameService {
       character: user.character,
     };
 
-    // Store in memory
     playerPositions.set(this.socket.id, playerState);
 
     console.log(
@@ -96,14 +87,12 @@ export class GameService {
     );
 
     // Send current game state to joining player
-    // FIX: Send "currentPlayers" (Array) to match Multiplayer.ts
     const allPlayers = Array.from(playerPositions.values());
     console.log("ALL PLAYER");
     console.log(allPlayers);
     this.socket.emit("currentPlayers", allPlayers);
 
     // Broadcast to other players
-    // FIX: Send "newPlayer" to match Multiplayer.ts
     this.socket.broadcast.emit("newPlayer", playerState);
   }
 
@@ -178,7 +167,7 @@ export class GameService {
   }
 
   private async handleCharacterUpdate(
-    data: CharacterUpdateData,
+    data: CharacterUpdateInput,
     userMap: Record<string, User>,
   ) {
     try {

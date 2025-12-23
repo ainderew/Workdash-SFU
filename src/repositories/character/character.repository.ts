@@ -1,5 +1,6 @@
+import type { CharacterUpdateInput } from "@/generated/prisma/models";
 import { prisma } from "@/prisma";
-import type { Character, CharacterType, ItemType } from "@prisma/client";
+import type { Character, CharacterType } from "@prisma/client";
 
 export class CharacterRepository {
   async create(
@@ -28,19 +29,7 @@ export class CharacterRepository {
     });
   }
 
-  async update(
-    userId: number,
-    data: {
-      name?: string;
-      type?: CharacterType;
-      bodyId?: number;
-      eyesId?: number;
-      hairstyleId?: number;
-      outfitId?: number;
-      itemId?: number | null;
-      itemType?: ItemType | null;
-    },
-  ): Promise<Character> {
+  async update(userId: number, data: CharacterUpdateInput): Promise<Character> {
     return await prisma.character.update({
       where: { userId },
       data,

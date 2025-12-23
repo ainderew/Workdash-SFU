@@ -33,10 +33,21 @@ export class UserRepository {
     });
   }
 
-  async findByIdWithCharacter(userId: number): Promise<UserWithCharacter | null> {
+  async findByIdWithCharacter(
+    userId: number,
+  ): Promise<UserWithCharacter | null> {
     return await prisma.user.findUnique({
       where: { id: userId },
       include: { character: true },
+    });
+  }
+
+  async updateName(userId: number, name: string): Promise<User> {
+    return await prisma.user.update({
+      where: { id: userId },
+      data: {
+        name,
+      },
     });
   }
 }
