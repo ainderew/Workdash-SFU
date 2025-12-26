@@ -295,13 +295,17 @@ async function startServer() {
           )?.[0];
           return producerSocketId !== socket.id;
         })
-        .map((data) => ({
-          producerId: data.producer.id,
-          socketId: Object.entries(socketTransports).find(([, transportIds]) =>
-            transportIds.includes(data.transportId),
-          )?.[0],
-          source: data.producer.appData.source,
-        }));
+        .map((data) => {
+          const producerSocketId = Object.entries(socketTransports).find(
+            ([, transportIds]) => transportIds.includes(data.transportId),
+          )?.[0];
+          return {
+            producerId: data.producer.id,
+            socketId: producerSocketId,
+            userName: producerSocketId ? userMap[producerSocketId]?.name : undefined,
+            source: data.producer.appData.source,
+          };
+        });
 
       callback(allProducers);
     });
