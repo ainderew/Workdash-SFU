@@ -52,9 +52,36 @@ export class GameService {
       },
     );
 
+    this.socket.on(
+      GameEventEnums.PLAYER_UPDATE_NAME,
+      async (data: { name: string }) => {
+        await this.handleNameUpdate(data, userMap);
+      },
+    );
+
     // Clean up on disconnect
     this.socket.on("disconnect", () => {
       this.handlePlayerDisconnect();
+    });
+  }
+
+  private handlePlayerAction(data: PlayerActionData) {
+    const playerState = playerPositions.get(this.socket.id);
+    if (!playerState) {
+      return;
+    }
+
+    console.log(`Player ${this.socket.id} performed action: ${data.action}`);
+
+    if (data.action === "attack") {
+      playerState.isAttacking = true;
+      playerPositions.set(this.socket.id, playerState);
+    }
+
+    // Broadcast action to all other players
+    this.socket.broadcast.emit("playerAction", {
+      playerId: this.socket.id,
+      action: data.action,
     });
   }
 
@@ -130,42 +157,6 @@ export class GameService {
     });
   }
 
-  private handlePlayerAction(data: PlayerActionData) {
-    const playerState = playerPositions.get(this.socket.id);
-    if (!playerState) return;
-
-    // Update attacking state if applicable
-    if (data.action === "attack") {
-      playerState.isAttacking = true;
-      playerPositions.set(this.socket.id, playerState);
-
-      // Reset after animation duration (e.g., 500ms)
-      setTimeout(() => {
-        const state = playerPositions.get(this.socket.id);
-        if (state) {
-          state.isAttacking = false;
-          playerPositions.set(this.socket.id, state);
-        }
-      }, 500);
-    }
-
-    // Broadcast action to all other players
-    this.socket.broadcast.emit(GameEventEnums.PLAYER_ACTION_BROADCAST, {
-      playerId: this.socket.id,
-      action: data.action,
-      targetId: data.targetId,
-      metadata: data.metadata,
-    });
-
-    // Confirm to sender
-    this.socket.emit(GameEventEnums.PLAYER_ACTION_BROADCAST, {
-      playerId: this.socket.id,
-      action: data.action,
-      targetId: data.targetId,
-      metadata: data.metadata,
-    });
-  }
-
   private async handleCharacterUpdate(
     data: CharacterUpdateInput,
     userMap: Record<string, User>,
@@ -196,19 +187,54 @@ export class GameService {
       );
 
       // Broadcast to all players (so they see updated sprite)
-      this.socket.broadcast.emit(GameEventEnums.CHARACTER_UPDATED, {
+      this.socket.broadcast.emit(GameEventEnums.RESPONSE_CHARACTER_UPDATED, {
         playerId: this.socket.id,
         character: updatedCharacter,
       });
 
       // Confirm to sender
-      this.socket.emit(GameEventEnums.CHARACTER_UPDATED, {
+      this.socket.emit(GameEventEnums.RESPONSE_CHARACTER_UPDATED, {
         playerId: this.socket.id,
         character: updatedCharacter,
       });
     } catch (error) {
       console.error("Failed to update character:", error);
       this.socket.emit("error", { message: "Failed to update character" });
+    }
+  }
+
+  private async handleNameUpdate(
+    data: { name: string },
+    userMap: Record<string, User>,
+  ) {
+    try {
+      const newName = data.name.trim();
+
+      if (!newName) {
+        console.error("Name update failed: empty name");
+        return;
+      }
+
+      // Update in-memory userMap
+      const user = userMap[this.socket.id];
+      if (user) {
+        user.name = newName;
+      }
+
+      // Update in-memory player state
+      const playerState = playerPositions.get(this.socket.id);
+      if (playerState) {
+        playerState.name = newName;
+        playerPositions.set(this.socket.id, playerState);
+      }
+
+      // Broadcast to all other players (not sender)
+      this.socket.broadcast.emit("nameUpdated", {
+        playerId: this.socket.id,
+        name: newName,
+      });
+    } catch (error) {
+      console.error("Failed to handle name update:", error);
     }
   }
 

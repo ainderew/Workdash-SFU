@@ -14,7 +14,8 @@ export class ChatService {
     this.socket.on(EventEnums.SEND_MESSAGE, (msg: Partial<Message>) => {
       const completeMessage: Message = {
         content: msg.content || "",
-        senderSocketId: this.socket.id,
+        senderSocketId: msg.senderSocketId!,
+        senderSpriteSheet: msg?.senderSpriteSheet,
         name: msg.name || "Unknown User",
         createdAt: new Date(),
         type: msg.type || "text",

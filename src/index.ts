@@ -398,17 +398,33 @@ async function startServer() {
 
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
-
-      const user = userMap[socket.id];
-      if (user) {
-        socket.broadcast.emit(GameEventEnums.PLAYER_LEFT, {
-          playerId: socket.id,
-          userId: user.userId,
-        });
-      }
       delete userMap[socket.id];
 
       const transportIds = socketTransports[socket.id] || [];
+
+      // Clean up producers and notify other clients
+      Object.entries(producers).forEach(([id, data]) => {
+        if (transportIds.includes(data.transportId)) {
+          const kind = data.producer.kind; // 'audio' or 'video'
+          const source = data.producer.appData?.source; // 'camera', 'screen', etc.
+
+          data.producer.close();
+          delete producers[id];
+
+          // Emit the SAME event structure as manual close
+          socket.broadcast.emit("endScreenShare", {
+            producerId: id,
+            kind,
+            source,
+          });
+
+          console.log(
+            `Cleaned up ${kind} producer (${source}) for disconnected socket ${socket.id}`,
+          );
+        }
+      });
+
+      // Clean up transports
       transportIds.forEach((id) => {
         const transport = transports[id];
         if (transport) {
@@ -418,14 +434,7 @@ async function startServer() {
       });
       delete socketTransports[socket.id];
 
-      Object.entries(producers).forEach(([id, data]) => {
-        if (transportIds.includes(data.transportId)) {
-          data.producer.close();
-          delete producers[id];
-          socket.broadcast.emit("producerClosed", { producerId: id });
-        }
-      });
-
+      // Clean up consumers
       Object.entries(consumers).forEach(([id, data]) => {
         if (transportIds.includes(data.transportId)) {
           data.consumer.close();
@@ -433,7 +442,6 @@ async function startServer() {
         }
       });
     });
-
     socket.emit("sfuInitialized");
   });
 
