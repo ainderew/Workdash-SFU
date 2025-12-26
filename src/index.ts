@@ -9,7 +9,6 @@ import { ChatService } from "./services/chat.service.js";
 import { ReactionService } from "./services/reaction.service.js";
 import { FocusModeService } from "./services/focusMode.service.js";
 import { GameService } from "./services/game.service.js";
-import { GameEventEnums } from "./services/_enums.js";
 import {
   socketAuthMiddleware,
   type AuthenticatedSocket,
@@ -302,7 +301,9 @@ async function startServer() {
           return {
             producerId: data.producer.id,
             socketId: producerSocketId,
-            userName: producerSocketId ? userMap[producerSocketId]?.name : undefined,
+            userName: producerSocketId
+              ? userMap[producerSocketId]?.name
+              : undefined,
             source: data.producer.appData.source,
           };
         });

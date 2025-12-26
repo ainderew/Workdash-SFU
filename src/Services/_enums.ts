@@ -20,7 +20,6 @@ export enum GameEventEnums {
   PLAYER_JOINED = "game:playerJoined",
   PLAYER_MOVEMENT = "game:playerMovement",
   PLAYER_LEFT = "game:playerLeft",
-  RESPONSE_PLAYER_ACTION_BROADCAST = "playerAction",
   RESPONSE_CHARACTER_UPDATED = "characterUpdated",
   GAME_STATE_SYNC = "game:stateSync",
 }
