@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -14,6 +8,47 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id           Int        @id @default(autoincrement())
+  email        String     @unique
+  passwordHash String
+  name         String?
+  role         UserRole   @default(MEMBER)
+  status       UserStatus @default(OFFLINE)
+  level        Int        @default(1)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  image        String?
+  character    Character?
+  presence     Presence?
+
+  @@index([email])
+}
+
+model Character {
+  id          Int           @id @default(autoincrement())
+  userId      Int           @unique
+  name        String
+  type        CharacterType
+  bodyId      Int
+  eyesId      Int
+  hairstyleId Int
+  outfitId    Int
+  itemId      Int?
+  itemType    ItemType?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  accessoryId Int?
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Presence {
+  userId     Int       @id
+  isOnline   Boolean   @default(false)
+  lastSeenAt DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
 
 enum UserRole {
   ADMIN
@@ -37,53 +72,4 @@ enum ItemType {
   LAPTOP
   TABLET
   NONE
-}
-
-model User {
-  id            Int       @id @default(autoincrement())
-  email         String    @unique
-  passwordHash  String
-  name          String?
-  image         String?
-  role          UserRole  @default(MEMBER)
-  status        UserStatus @default(OFFLINE)
-  level         Int       @default(1)
-
-  character     Character?
-
-  lastLoginAt   DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  presence      Presence?
-
-  @@index([email])
-}
-
-
-model Character {
-  id            Int           @id @default(autoincrement())
-  userId        Int           @unique
-  name          String
-  type          CharacterType
-
-  bodyId        Int
-  eyesId        Int
-  hairstyleId   Int
-  outfitId      Int
-  accessoryId    Int?
-  itemId        Int?
-  itemType      ItemType?
-
-  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-}
-
-model Presence {
-  userId      Int     @id
-  isOnline    Boolean @default(false)
-  lastSeenAt  DateTime?
-
-  user        User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

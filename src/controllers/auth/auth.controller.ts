@@ -6,6 +6,7 @@ const authService = new AuthService();
 
 export const syncGoogleUser = async (req: Request, res: Response) => {
   try {
+    console.log("AHHHHHH");
     const { email, name } = req.body;
 
     console.log("EMAIL");
