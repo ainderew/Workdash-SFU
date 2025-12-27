@@ -23,6 +23,10 @@ export const httpAuthMiddleware = (
     // Extract token (remove "Bearer " prefix)
     const token = authHeader.split(" ")[1];
 
+    if (!token) {
+      throw new Error("Token is missing");
+    }
+
     // Verify JWT
     const payload: JwtPayload = JwtUtil.verify(token);
 

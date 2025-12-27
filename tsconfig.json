@@ -52,6 +52,7 @@
   "exclude": [
     "node_modules",
     "prisma.config.ts",
+    "dist",
     "**/*.config.ts"
   ]
 }

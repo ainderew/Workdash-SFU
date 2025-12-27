@@ -1,13 +1,13 @@
 import { Socket } from "socket.io";
 import { GameEventEnums } from "./_enums.js";
 import type {
-  User,
   PlayerState,
   PlayerMovementData,
   PlayerActionData,
 } from "./_types.js";
 import { CharacterRepository } from "../repositories/character/character.repository.js";
 import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
+import type { User } from "../index.js";
 
 // In-memory player positions (Shared across all socket instances)
 const playerPositions: Map<string, PlayerState> = new Map();

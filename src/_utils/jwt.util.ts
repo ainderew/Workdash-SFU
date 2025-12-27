@@ -1,4 +1,4 @@
-import jwt from 'jsonwebtoken';
+import jwt, { type SignOptions } from "jsonwebtoken";
 
 export interface JwtPayload {
   userId: number;
@@ -9,18 +9,23 @@ export interface JwtPayload {
 }
 
 export class JwtUtil {
-  private static secret = process.env.JWT_SECRET || 'fallback-secret-dev-only';
-  private static expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+  private static secret = process.env.JWT_SECRET || "fallback-secret-dev-only";
+  private static expiresIn = process.env.JWT_EXPIRES_IN || "7d";
 
-  static sign(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
-    if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'fallback-secret-dev-only') {
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('JWT_SECRET must be set in production');
+  static sign(payload: Omit<JwtPayload, "iat" | "exp">): string {
+    if (
+      !process.env.JWT_SECRET ||
+      process.env.JWT_SECRET === "fallback-secret-dev-only"
+    ) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error("JWT_SECRET must be set in production");
       }
-      console.warn('⚠️  Using fallback JWT secret - DO NOT use in production');
+      console.warn("⚠️  Using fallback JWT secret - DO NOT use in production");
     }
 
-    return jwt.sign(payload, this.secret, { expiresIn: this.expiresIn });
+    return jwt.sign(payload, this.secret, {
+      expiresIn: this.expiresIn,
+    } as SignOptions);
   }
 
   static verify(token: string): JwtPayload {
