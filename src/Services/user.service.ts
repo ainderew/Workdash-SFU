@@ -1,5 +1,5 @@
-import { UserRepository } from "@/repositories/user/user.repository";
-import type { UserWithCharacter } from "@/repositories/user/user.repository";
+import { UserRepository } from "@/repositories/user/user.repository.js";
+import type { UserWithCharacter } from "@/repositories/user/user.repository.js";
 import type { User } from "@prisma/client";
 
 export class UserService {

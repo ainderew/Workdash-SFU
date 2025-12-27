@@ -1,5 +1,5 @@
 import type { CharacterType, ItemType } from "@/generated/prisma/enums";
-import type { CharacterRepository } from "@/repositories/character/character.repository";
+import type { CharacterRepository } from "@/repositories/character/character.repository.js";
 
 interface UpdateCharacterDTO {
   name?: string;

@@ -1,6 +1,6 @@
 import { prisma } from "@/prisma";
 import type { User, Character } from "@prisma/client";
-import type { GoogleUserData } from "./_types";
+import type { GoogleUserData } from "./_types.js";
 
 export type UserWithCharacter = User & {
   character: Character | null;
