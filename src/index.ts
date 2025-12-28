@@ -233,59 +233,74 @@ async function startServer() {
         const transport = transports[transportId];
         if (!transport) {
           console.error("Transport not found:", transportId);
-          throw new Error("Transport not found");
+          callback({ error: "Transport not found" });
+          return;
         }
 
-        await transport.connect({ dtlsParameters });
-        console.log("Transport connected:", transportId);
-        callback();
+        try {
+          await transport.connect({ dtlsParameters });
+          console.log("Transport connected:", transportId);
+          callback();
+        } catch (error) {
+          console.error("Failed to connect transport:", error);
+          callback({ error: "Failed to connect transport" });
+        }
       },
     );
 
     socket.on(
       "produce",
       async ({ kind, rtpParameters, transportId, appData }, callback) => {
-        let selectedTransportId = transportId;
+        try {
+          let selectedTransportId = transportId;
 
-        if (!selectedTransportId) {
-          selectedTransportId = socketTransports[socket.id]?.[0];
-        }
+          if (!selectedTransportId) {
+            selectedTransportId = socketTransports[socket.id]?.[0];
+          }
 
-        if (!selectedTransportId) {
-          throw new Error("No transport found for this socket");
-        }
+          if (!selectedTransportId) {
+            console.error("No transport found for socket:", socket.id);
+            callback({ error: "No transport found for this socket" });
+            return;
+          }
 
-        const transport = transports[selectedTransportId];
-        if (!transport) {
-          throw new Error("Transport not found");
-        }
+          const transport = transports[selectedTransportId];
+          if (!transport) {
+            console.error("Transport not found:", selectedTransportId);
+            callback({ error: "Transport not found" });
+            return;
+          }
 
-        console.log(
-          `Producing on transport ${selectedTransportId} for socket ${socket.id}`,
-        );
+          console.log(
+            `Producing on transport ${selectedTransportId} for socket ${socket.id}`,
+          );
 
-        const producer = await transport.produce({
-          kind,
-          rtpParameters,
-          appData,
-        });
-        producers[producer.id] = { producer, transportId: selectedTransportId };
-
-        if (kind === "audio") {
-          socket.broadcast.emit("newProducer", {
-            producerId: producer.id,
-            userName: userMap[socket.id]?.name,
-            source: producer.appData.source,
+          const producer = await transport.produce({
+            kind,
+            rtpParameters,
+            appData,
           });
-        } else {
-          io.emit("newProducer", {
-            producerId: producer.id,
-            userName: userMap[socket.id]?.name,
-            source: producer.appData.source,
-          });
-        }
+          producers[producer.id] = { producer, transportId: selectedTransportId };
 
-        callback({ id: producer.id });
+          if (kind === "audio") {
+            socket.broadcast.emit("newProducer", {
+              producerId: producer.id,
+              userName: userMap[socket.id]?.name,
+              source: producer.appData.source,
+            });
+          } else {
+            io.emit("newProducer", {
+              producerId: producer.id,
+              userName: userMap[socket.id]?.name,
+              source: producer.appData.source,
+            });
+          }
+
+          callback({ id: producer.id });
+        } catch (error) {
+          console.error("Failed to produce:", error);
+          callback({ error: "Failed to produce media" });
+        }
       },
     );
 
@@ -317,74 +332,86 @@ async function startServer() {
     socket.on(
       "consume",
       async ({ producerId, rtpCapabilities, transportId }, callback) => {
-        const producerData = producers[producerId];
-        if (!producerData) {
-          console.error("Producer not found:", producerId);
-          throw new Error("Producer not found");
-        }
+        try {
+          const producerData = producers[producerId];
+          if (!producerData) {
+            console.error("Producer not found:", producerId);
+            callback({ error: "Producer not found" });
+            return;
+          }
 
-        if (!router) {
-          throw new Error("Router not initialized");
-        }
+          if (!router) {
+            console.error("Router not initialized");
+            callback({ error: "Router not initialized" });
+            return;
+          }
 
-        if (!router.canConsume({ producerId, rtpCapabilities })) {
-          console.error("Cannot consume - incompatible RTP capabilities");
-          return callback({ error: "Cannot consume" });
-        }
+          if (!router.canConsume({ producerId, rtpCapabilities })) {
+            console.error("Cannot consume - incompatible RTP capabilities");
+            callback({ error: "Cannot consume" });
+            return;
+          }
 
-        let selectedTransportId = transportId;
+          let selectedTransportId = transportId;
 
-        if (!selectedTransportId) {
-          const ids = socketTransports[socket.id] || [];
-          selectedTransportId = ids[ids.length - 1];
+          if (!selectedTransportId) {
+            const ids = socketTransports[socket.id] || [];
+            selectedTransportId = ids[ids.length - 1];
+            console.log(
+              "No transport specified, using last one:",
+              selectedTransportId,
+            );
+          }
+
+          if (!selectedTransportId) {
+            console.error("No transport found for socket:", socket.id);
+            callback({ error: "No transport found for this socket" });
+            return;
+          }
+
+          const transport = transports[selectedTransportId];
+          if (!transport) {
+            console.error("Transport not found:", selectedTransportId);
+            callback({ error: "Transport not found" });
+            return;
+          }
+
+          console.log(`Using transport ${selectedTransportId} for consuming`);
+          console.log(`Transport state:`, {
+            id: transport.id,
+            closed: transport.closed,
+            dtlsState: transport.dtlsState,
+          });
+
+          const consumer = await transport.consume({
+            producerId,
+            rtpCapabilities,
+            paused: true,
+          });
+
+          consumers[consumer.id] = { consumer, transportId: selectedTransportId };
+
           console.log(
-            "No transport specified, using last one:",
+            "Consumer created:",
+            consumer.id,
+            "for socket:",
+            socket.id,
+            "kind:",
+            consumer.kind,
+            "on transport:",
             selectedTransportId,
           );
+
+          callback({
+            id: consumer.id,
+            producerId: consumer.producerId,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters,
+          });
+        } catch (error) {
+          console.error("Failed to consume:", error);
+          callback({ error: "Failed to consume media" });
         }
-
-        if (!selectedTransportId) {
-          throw new Error("No transport found for this socket");
-        }
-
-        const transport = transports[selectedTransportId];
-        if (!transport) {
-          console.error("Transport not found:", selectedTransportId);
-          throw new Error("Transport not found");
-        }
-
-        console.log(`Using transport ${selectedTransportId} for consuming`);
-        console.log(`Transport state:`, {
-          id: transport.id,
-          closed: transport.closed,
-          dtlsState: transport.dtlsState,
-        });
-
-        const consumer = await transport.consume({
-          producerId,
-          rtpCapabilities,
-          paused: true,
-        });
-
-        consumers[consumer.id] = { consumer, transportId: selectedTransportId };
-
-        console.log(
-          "Consumer created:",
-          consumer.id,
-          "for socket:",
-          socket.id,
-          "kind:",
-          consumer.kind,
-          "on transport:",
-          selectedTransportId,
-        );
-
-        callback({
-          id: consumer.id,
-          producerId: consumer.producerId,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
-        });
       },
     );
 
