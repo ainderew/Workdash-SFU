@@ -9,6 +9,7 @@ import { ChatService } from "./services/chat.service.js";
 import { ReactionService } from "./services/reaction.service.js";
 import { FocusModeService } from "./services/focusMode.service.js";
 import { GameService } from "./services/game.service.js";
+import { PollService } from "./services/poll.service.js";
 import {
   socketAuthMiddleware,
   type AuthenticatedSocket,
@@ -162,11 +163,13 @@ async function startServer() {
     const reactionService = new ReactionService(socket);
     const focusModeService = new FocusModeService(socket);
     const gameService = new GameService(socket, authSocket.userId);
+    const pollService = new PollService(socket, io, String(authSocket.userId));
 
     chatService.listenForMessage();
     reactionService.listenForReactions();
     focusModeService.listenForFocusModeChange(userMap);
     gameService.listenForGameEvents(userMap);
+    pollService.listenForPollEvents();
 
     socketTransports[socket.id] = [];
 
@@ -404,6 +407,8 @@ async function startServer() {
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
       delete userMap[socket.id];
+
+      pollService.cleanupPollsOnDisconnect();
 
       const transportIds = socketTransports[socket.id] || [];
 

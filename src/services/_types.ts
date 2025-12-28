@@ -79,3 +79,29 @@ export type CharacterUpdateData = {
   itemId?: number | null;
   itemType?: string | null;
 };
+
+export type PollOption = {
+  id: string;
+  text: string;
+  votes: number;
+};
+
+export type Poll = {
+  id: string;
+  question: string;
+  options: PollOption[];
+  creatorId: string;
+  creatorName: string;
+  createdAt: Date;
+  isActive: boolean;
+  allowMultiple: boolean;
+  totalVotes: number;
+  voters: string[];
+};
+
+export type Vote = {
+  pollId: string;
+  userId: string;
+  optionIds: string[];
+  timestamp: Date;
+};

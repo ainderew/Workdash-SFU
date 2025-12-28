@@ -23,3 +23,12 @@ export enum GameEventEnums {
   RESPONSE_CHARACTER_UPDATED = "characterUpdated",
   GAME_STATE_SYNC = "game:stateSync",
 }
+
+export enum PollEvents {
+  CREATE_POLL = "createPoll",
+  NEW_POLL = "newPoll",
+  SUBMIT_VOTE = "submitVote",
+  POLL_UPDATED = "pollUpdated",
+  CLOSE_POLL = "closePoll",
+  POLL_CLOSED = "pollClosed",
+}
