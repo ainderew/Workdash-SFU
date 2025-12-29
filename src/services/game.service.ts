@@ -9,7 +9,7 @@ import { CharacterRepository } from "../repositories/character/character.reposit
 import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
 import type { User } from "../index.js";
 
-// In-memory player positions (Shared across all socket instances)
+// In-memory player positions Shared across all socket instances)
 const playerPositions: Map<string, PlayerState> = new Map();
 
 export class GameService {
@@ -17,8 +17,10 @@ export class GameService {
   private userId: number;
   private characterRepository: CharacterRepository;
   private lastMovementTime: number = 0;
-  private readonly MOVEMENT_THROTTLE_MS = 50; // Max 20 updates/sec
 
+  // Max 20 updates/sec.
+  // it's the tickrate of the front end 1000/50 = 20
+  private readonly MOVEMENT_THROTTLE_MS = 50;
   constructor(socket: Socket, userId: number) {
     this.socket = socket;
     this.userId = userId;
@@ -39,12 +41,10 @@ export class GameService {
       this.handlePlayerMovement(data);
     });
 
-    // Player Actions (attack, interact, emote)
     this.socket.on(GameEventEnums.PLAYER_ACTION, (data: PlayerActionData) => {
       this.handlePlayerAction(data);
     });
 
-    // Character Customization Update
     this.socket.on(
       GameEventEnums.PLAYER_UPDATE_CHARACTER,
       async (data: CharacterUpdateInput) => {
@@ -70,8 +70,6 @@ export class GameService {
     if (!playerState) {
       return;
     }
-
-    console.log(`Player ${this.socket.id} performed action: ${data.action}`);
 
     if (data.action === "attack") {
       playerState.isAttacking = true;

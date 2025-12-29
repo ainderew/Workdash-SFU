@@ -10,6 +10,7 @@ import { ReactionService } from "./services/reaction.service.js";
 import { FocusModeService } from "./services/focusMode.service.js";
 import { GameService } from "./services/game.service.js";
 import { PollService } from "./services/poll.service.js";
+import { AudioZoneService } from "./services/audioZone.service.js";
 import {
   socketAuthMiddleware,
   type AuthenticatedSocket,
@@ -19,6 +20,7 @@ import authRoutes from "./routes/auth.route.js";
 import characterRoutes from "./routes/character.route.js";
 import userRoutes from "./routes/user.route.js";
 import { httpAuthMiddleware } from "./middleware/http-auth.middlware.js";
+
 dotenv.config();
 
 const app = express();
@@ -62,6 +64,19 @@ const consumers: Record<
   string,
   { consumer: mediasoup.types.Consumer; transportId: string }
 > = {};
+
+// Audio zone state
+const socketZones: Record<string, string | null> = {};
+const zoneRooms: Record<string, Set<string>> = {};
+
+// Bundle shared state for services
+const getSharedState = () => ({
+  socketZones,
+  zoneRooms,
+  userMap,
+  producers,
+  socketTransports,
+});
 
 async function createWorker() {
   const worker = await mediasoup.createWorker({
@@ -159,21 +174,25 @@ async function startServer() {
 
     console.log("User added to userMap:", socket.id, userMap[socket.id]?.name);
 
+    // Initialize services
     const chatService = new ChatService(socket);
     const reactionService = new ReactionService(socket);
     const focusModeService = new FocusModeService(socket);
     const gameService = new GameService(socket, authSocket.userId);
     const pollService = new PollService(socket, io, String(authSocket.userId));
+    const audioZoneService = new AudioZoneService(socket, getSharedState());
 
+    // Start listening
     chatService.listenForMessage();
     reactionService.listenForReactions();
     focusModeService.listenForFocusModeChange(userMap);
     gameService.listenForGameEvents(userMap);
     pollService.listenForPollEvents();
+    audioZoneService.listen();
 
     socketTransports[socket.id] = [];
 
-    // --- MEDIASOUP LISTENERS ATTACHED HERE ---
+    // --- MEDIASOUP LISTENERS ---
     socket.on("getRouterRtpCapabilities", (_, callback) => {
       console.log("getRouterRtpCapabilities requested by:", socket.id);
 
@@ -280,17 +299,29 @@ async function startServer() {
             rtpParameters,
             appData,
           });
-          producers[producer.id] = { producer, transportId: selectedTransportId };
+          producers[producer.id] = {
+            producer,
+            transportId: selectedTransportId,
+          };
 
           if (kind === "audio") {
-            socket.broadcast.emit("newProducer", {
-              producerId: producer.id,
-              userName: userMap[socket.id]?.name,
-              source: producer.appData.source,
-            });
+            // Only broadcast to players in same zone
+            AudioZoneService.broadcastToZone(
+              socket,
+              socketZones,
+              "newProducer",
+              {
+                producerId: producer.id,
+                socketId: socket.id,
+                userName: userMap[socket.id]?.name,
+                source: producer.appData.source,
+              },
+            );
           } else {
+            // Video (screen share) goes to everyone
             io.emit("newProducer", {
               producerId: producer.id,
+              socketId: socket.id,
               userName: userMap[socket.id]?.name,
               source: producer.appData.source,
             });
@@ -305,17 +336,32 @@ async function startServer() {
     );
 
     socket.on("getProducers", (_unused, callback) => {
-      const allProducers = Array.from(Object.values(producers))
-        .filter((data) => {
+      const allProducers = Object.entries(producers)
+        .filter(([, data]) => {
           const producerSocketId = Object.entries(socketTransports).find(
             ([, transportIds]) => transportIds.includes(data.transportId),
           )?.[0];
-          return producerSocketId !== socket.id;
+
+          // Exclude own producers
+          if (producerSocketId === socket.id) return false;
+
+          // For audio, only include producers from same zone
+          if (data.producer.kind === "audio" && producerSocketId) {
+            return AudioZoneService.shouldReceiveAudio(
+              socketZones,
+              producerSocketId,
+              socket.id,
+            );
+          }
+
+          // Video (screen share) from anyone
+          return true;
         })
-        .map((data) => {
+        .map(([, data]) => {
           const producerSocketId = Object.entries(socketTransports).find(
             ([, transportIds]) => transportIds.includes(data.transportId),
           )?.[0];
+
           return {
             producerId: data.producer.id,
             socketId: producerSocketId,
@@ -323,6 +369,7 @@ async function startServer() {
               ? userMap[producerSocketId]?.name
               : undefined,
             source: data.producer.appData.source,
+            kind: data.producer.kind,
           };
         });
 
@@ -350,6 +397,27 @@ async function startServer() {
             console.error("Cannot consume - incompatible RTP capabilities");
             callback({ error: "Cannot consume" });
             return;
+          }
+
+          // For audio, verify zone membership
+          if (producerData.producer.kind === "audio") {
+            const producerSocketId = Object.entries(socketTransports).find(
+              ([, transportIds]) =>
+                transportIds.includes(producerData.transportId),
+            )?.[0];
+
+            if (
+              producerSocketId &&
+              !AudioZoneService.shouldReceiveAudio(
+                socketZones,
+                producerSocketId,
+                socket.id,
+              )
+            ) {
+              console.error("Cannot consume audio - different zones");
+              callback({ error: "Cannot consume - different zones" });
+              return;
+            }
           }
 
           let selectedTransportId = transportId;
@@ -389,7 +457,10 @@ async function startServer() {
             paused: true,
           });
 
-          consumers[consumer.id] = { consumer, transportId: selectedTransportId };
+          consumers[consumer.id] = {
+            consumer,
+            transportId: selectedTransportId,
+          };
 
           console.log(
             "Consumer created:",
@@ -435,6 +506,9 @@ async function startServer() {
       console.log("Client disconnected:", socket.id);
       delete userMap[socket.id];
 
+      // Clean up zones
+      audioZoneService.cleanup();
+
       pollService.cleanupPollsOnDisconnect();
 
       const transportIds = socketTransports[socket.id] || [];
@@ -442,13 +516,12 @@ async function startServer() {
       // Clean up producers and notify other clients
       Object.entries(producers).forEach(([id, data]) => {
         if (transportIds.includes(data.transportId)) {
-          const kind = data.producer.kind; // 'audio' or 'video'
-          const source = data.producer.appData?.source; // 'camera', 'screen', etc.
+          const kind = data.producer.kind;
+          const source = data.producer.appData?.source;
 
           data.producer.close();
           delete producers[id];
 
-          // Emit the SAME event structure as manual close
           socket.broadcast.emit("endScreenShare", {
             producerId: id,
             kind,
@@ -479,6 +552,7 @@ async function startServer() {
         }
       });
     });
+
     socket.emit("sfuInitialized");
   });
 
