@@ -19,6 +19,7 @@ import { UserRepository } from "./repositories/user/user.repository.js";
 import authRoutes from "./routes/auth.route.js";
 import characterRoutes from "./routes/character.route.js";
 import userRoutes from "./routes/user.route.js";
+import settingsRoutes from "./routes/settings.route.js";
 import { httpAuthMiddleware } from "./middleware/http-auth.middlware.js";
 
 dotenv.config();
@@ -30,6 +31,7 @@ app.use(express.json());
 app.use("/api/auth", authRoutes);
 app.use("/api/character", httpAuthMiddleware, characterRoutes);
 app.use("/api/user", httpAuthMiddleware, userRoutes);
+app.use("/api/settings", httpAuthMiddleware, settingsRoutes);
 
 const server = new http.Server(app);
 const io = new Server(server, {
