@@ -2,7 +2,7 @@ import type { Character } from "@prisma/client";
 
 export type LinkMetadata = {
   url: string;
-  type: 'youtube' | 'twitter' | 'github' | 'generic';
+  type: "youtube" | "twitter" | "github" | "generic";
   title?: string;
   description?: string;
   image?: string;
@@ -14,7 +14,7 @@ export type LinkMetadata = {
   // GitHub specific
   githubOwner?: string;
   githubRepo?: string;
-  githubType?: 'repo' | 'issue' | 'pull';
+  githubType?: "repo" | "issue" | "pull";
   githubIssueNumber?: string;
 };
 
@@ -62,6 +62,7 @@ export type PlayerMovementData = {
   vx: number;
   vy: number;
   isAttacking: boolean;
+  isKartMode: boolean;
 };
 
 export type PlayerActionData = {

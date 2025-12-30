@@ -19,7 +19,7 @@ export const getSettings = async (req: Request, res: Response) => {
     }
 
     return res.status(200).json(settings);
-  } catch (error) {
+  } catch {
     return res.status(500).json({ error: "Failed to fetch settings" });
   }
 };
@@ -59,13 +59,10 @@ export const updateSettings = async (req: Request, res: Response) => {
       });
     }
 
-    const updatedSettings = await settingsRepository.upsert(
-      userId,
-      updateData,
-    );
+    const updatedSettings = await settingsRepository.upsert(userId, updateData);
 
     return res.status(200).json(updatedSettings);
-  } catch (error) {
+  } catch {
     return res.status(500).json({ error: "Failed to update settings" });
   }
 };
