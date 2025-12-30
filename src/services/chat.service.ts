@@ -19,6 +19,7 @@ export class ChatService {
         name: msg.name || "Unknown User",
         createdAt: new Date(),
         type: msg.type || "text",
+        clientId: msg.clientId!,
         ...(msg.gifUrl && { gifUrl: msg.gifUrl }),
         ...(msg.imageUrl && { imageUrl: msg.imageUrl }),
       };

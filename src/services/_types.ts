@@ -24,6 +24,7 @@ export type Message = {
   senderSpriteSheet: string | undefined;
   name: string;
   createdAt: Date;
+  clientId: string;
   type?: "text" | "gif" | "image";
   gifUrl?: string;
   imageUrl?: string;
