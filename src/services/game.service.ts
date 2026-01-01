@@ -8,9 +8,15 @@ import type {
 import { CharacterRepository } from "../repositories/character/character.repository.js";
 import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
 import type { User } from "../index.js";
+import { SoccerService } from "./soccer.service.js";
 
 // In-memory player positions Shared across all socket instances)
 const playerPositions: Map<string, PlayerState> = new Map();
+
+// Export player positions for other services (e.g., soccer collision detection)
+export function getPlayerPositions(): Map<string, PlayerState> {
+  return playerPositions;
+}
 
 export class GameService {
   private socket: Socket;
@@ -123,6 +129,20 @@ export class GameService {
     // Join Socket.io room for this scene
     this.socket.join(`scene:${sceneName}`);
 
+    // If joining SoccerMap, add to physics tracking
+    if (sceneName === "SoccerMap") {
+      SoccerService.updatePlayerPhysicsState(this.socket.id, {
+        x: data.x,
+        y: data.y,
+        vx: 0,
+        vy: 0,
+        radius: 30,
+      });
+
+      // Immediately broadcast current physics state to new player
+      SoccerService.broadcastInitialPhysicsState(this.socket.id);
+    }
+
     console.log(
       `Player joined: ${user.name} (${this.socket.id}) at (${data.x}, ${data.y}) in scene ${sceneName}`,
     );
@@ -171,6 +191,17 @@ export class GameService {
     }
 
     playerPositions.set(this.socket.id, playerState);
+
+    // If in SoccerMap, also update physics state
+    if (playerState.currentScene === "SoccerMap") {
+      SoccerService.updatePlayerPhysicsState(this.socket.id, {
+        x: data.x,
+        y: data.y,
+        vx: data.vx,
+        vy: data.vy,
+        radius: 30, // Match client hitbox
+      });
+    }
 
     // Broadcast ONLY to players in the same scene
     this.socket.to(`scene:${playerState.currentScene}`).emit("playerMoved", {
@@ -282,6 +313,11 @@ export class GameService {
       id: this.socket.id,
     });
 
+    // If leaving SoccerMap, remove from physics tracking
+    if (oldScene === "SoccerMap") {
+      SoccerService.removePlayerPhysics(this.socket.id);
+    }
+
     // Update player state
     player.currentScene = newScene;
     player.x = data.x;
@@ -290,6 +326,17 @@ export class GameService {
 
     // Join new scene room
     this.socket.join(`scene:${newScene}`);
+
+    // If entering SoccerMap, add to physics tracking
+    if (newScene === "SoccerMap") {
+      SoccerService.updatePlayerPhysicsState(this.socket.id, {
+        x: data.x,
+        y: data.y,
+        vx: 0,
+        vy: 0,
+        radius: 30,
+      });
+    }
 
     // Send current players in new scene
     const playersInScene = Array.from(playerPositions.values()).filter(
@@ -312,6 +359,11 @@ export class GameService {
       console.log(
         `Player disconnected and removed: ${this.socket.id} from scene ${sceneName}`,
       );
+
+      // If in SoccerMap, remove from physics tracking
+      if (sceneName === "SoccerMap") {
+        SoccerService.removePlayerPhysics(this.socket.id);
+      }
 
       // Notify players in the same scene that this player disconnected
       this.socket.to(`scene:${sceneName}`).emit("deletePlayer", {
