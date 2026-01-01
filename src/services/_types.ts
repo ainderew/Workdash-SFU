@@ -49,6 +49,7 @@ export type PlayerState = PlayerPosition & {
   name: string;
   isAttacking: boolean;
   character: Character;
+  currentScene: string; // Track which scene/map player is in
 };
 
 export type PlayerJoinData = {
@@ -64,6 +65,7 @@ export type PlayerMovementData = {
   vy: number;
   isAttacking: boolean;
   isKartMode: boolean;
+  currentScene?: string; // Optional scene identifier for tracking
 };
 
 export type PlayerActionData = {
@@ -106,4 +108,29 @@ export type Vote = {
   userId: string;
   optionIds: string[];
   timestamp: Date;
+};
+
+// Soccer ball types
+export type BallState = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  lastTouchId: string | null;
+  lastTouchTimestamp: number;
+  isMoving: boolean;
+};
+
+export type BallKickData = {
+  playerId: string;
+  kickPower: number;
+  angle: number;
+};
+
+export type BallDribbleData = {
+  playerId: string;
+  playerX: number;
+  playerY: number;
+  playerVx: number;
+  playerVy: number;
 };

@@ -33,9 +33,12 @@ export class GameService {
       this.socket.id,
     );
 
-    this.socket.on("playerJoin", (data: { x: number; y: number }) => {
-      this.handlePlayerJoin(data, userMap);
-    });
+    this.socket.on(
+      "playerJoin",
+      (data: { x: number; y: number; scene?: string }) => {
+        this.handlePlayerJoin(data, userMap);
+      },
+    );
 
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
       this.handlePlayerMovement(data);
@@ -59,6 +62,13 @@ export class GameService {
       },
     );
 
+    this.socket.on(
+      GameEventEnums.SCENE_CHANGE,
+      (data: { newScene: string; x: number; y: number }) => {
+        this.handleSceneChange(data);
+      },
+    );
+
     // Clean up on disconnect
     this.socket.on("disconnect", () => {
       this.handlePlayerDisconnect();
@@ -76,15 +86,15 @@ export class GameService {
       playerPositions.set(this.socket.id, playerState);
     }
 
-    // Broadcast action to all other players
-    this.socket.broadcast.emit("playerAction", {
+    // Broadcast action to players in the same scene
+    this.socket.to(`scene:${playerState.currentScene}`).emit("playerAction", {
       playerId: this.socket.id,
       action: data.action,
     });
   }
 
   private handlePlayerJoin(
-    data: { x: number; y: number },
+    data: { x: number; y: number; scene?: string },
     userMap: Record<string, User>,
   ) {
     const user = userMap[this.socket.id];
@@ -92,6 +102,8 @@ export class GameService {
       console.error("User not found in userMap for socket:", this.socket.id);
       return;
     }
+
+    const sceneName = data.scene || "MainMap"; // Default to MainMap
 
     const playerState: PlayerState = {
       id: this.socket.id,
@@ -103,22 +115,30 @@ export class GameService {
       vy: 0,
       isAttacking: false,
       character: user.character,
+      currentScene: sceneName,
     };
 
     playerPositions.set(this.socket.id, playerState);
 
+    // Join Socket.io room for this scene
+    this.socket.join(`scene:${sceneName}`);
+
     console.log(
-      `Player joined: ${user.name} (${this.socket.id}) at (${data.x}, ${data.y})`,
+      `Player joined: ${user.name} (${this.socket.id}) at (${data.x}, ${data.y}) in scene ${sceneName}`,
     );
 
-    // Send current game state to joining player
-    const allPlayers = Array.from(playerPositions.values());
-    console.log("ALL PLAYER");
-    console.log(allPlayers);
-    this.socket.emit("currentPlayers", allPlayers);
+    // Send only players in the same scene (excluding this player)
+    const playersInScene = Array.from(playerPositions.values()).filter(
+      (p) => p.currentScene === sceneName && p.id !== this.socket.id,
+    );
+    console.log("PLAYERS IN SCENE:", playersInScene.length);
+    this.socket.emit("currentPlayers", playersInScene);
 
-    // Broadcast to other players
-    this.socket.broadcast.emit("newPlayer", playerState);
+    // Send the joining player's own state back to them so they can create themselves
+    this.socket.emit("newPlayer", playerState);
+
+    // Broadcast to other players in the same scene only
+    this.socket.to(`scene:${sceneName}`).emit("newPlayer", playerState);
   }
 
   private handlePlayerMovement(data: PlayerMovementData) {
@@ -145,11 +165,15 @@ export class GameService {
       playerState.isAttacking = data.isAttacking;
     }
 
+    // Update scene if provided
+    if (data.currentScene && data.currentScene !== playerState.currentScene) {
+      playerState.currentScene = data.currentScene;
+    }
+
     playerPositions.set(this.socket.id, playerState);
 
-    // Broadcast to all other players (not sender)
-    // FIX: Send "playerMoved" to match Multiplayer.ts
-    this.socket.broadcast.emit("playerMoved", {
+    // Broadcast ONLY to players in the same scene
+    this.socket.to(`scene:${playerState.currentScene}`).emit("playerMoved", {
       id: this.socket.id,
       ...data,
     });
@@ -236,14 +260,63 @@ export class GameService {
     }
   }
 
+  private handleSceneChange(data: { newScene: string; x: number; y: number }) {
+    const player = playerPositions.get(this.socket.id);
+    if (!player) {
+      console.error("Player not found for scene change:", this.socket.id);
+      return;
+    }
+
+    const oldScene = player.currentScene;
+    const newScene = data.newScene;
+
+    console.log(
+      `Player ${player.name} (${this.socket.id}) changing scene from ${oldScene} to ${newScene}`,
+    );
+
+    // Leave old scene room
+    this.socket.leave(`scene:${oldScene}`);
+
+    // Notify players in old scene that this player left
+    this.socket.to(`scene:${oldScene}`).emit("deletePlayer", {
+      id: this.socket.id,
+    });
+
+    // Update player state
+    player.currentScene = newScene;
+    player.x = data.x;
+    player.y = data.y;
+    playerPositions.set(this.socket.id, player);
+
+    // Join new scene room
+    this.socket.join(`scene:${newScene}`);
+
+    // Send current players in new scene
+    const playersInScene = Array.from(playerPositions.values()).filter(
+      (p) => p.currentScene === newScene && p.id !== this.socket.id,
+    );
+
+    this.socket.emit("currentPlayers", playersInScene);
+
+    // Notify players in new scene that this player joined
+    this.socket.to(`scene:${newScene}`).emit("newPlayer", player);
+  }
+
   private handlePlayerDisconnect() {
     // Remove from in-memory state
-    if (playerPositions.has(this.socket.id)) {
-      playerPositions.delete(this.socket.id);
-      console.log(`Player disconnected and removed: ${this.socket.id}`);
+    const player = playerPositions.get(this.socket.id);
+    if (player) {
+      const sceneName = player.currentScene;
 
-      // FIX: Broadcast "deletePlayer" to match Multiplayer.ts
-      this.socket.broadcast.emit("deletePlayer", { id: this.socket.id });
+      playerPositions.delete(this.socket.id);
+      console.log(
+        `Player disconnected and removed: ${this.socket.id} from scene ${sceneName}`,
+      );
+
+      // Notify players in the same scene that this player disconnected
+      this.socket.to(`scene:${sceneName}`).emit("deletePlayer", {
+        id: this.socket.id,
+      });
     }
   }
 }

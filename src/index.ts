@@ -11,6 +11,7 @@ import { FocusModeService } from "./services/focusMode.service.js";
 import { GameService } from "./services/game.service.js";
 import { PollService } from "./services/poll.service.js";
 import { AudioZoneService } from "./services/audioZone.service.js";
+import { SoccerService } from "./services/soccer.service.js";
 import {
   socketAuthMiddleware,
   type AuthenticatedSocket,
@@ -183,6 +184,7 @@ async function startServer() {
     const gameService = new GameService(socket, authSocket.userId);
     const pollService = new PollService(socket, io, String(authSocket.userId));
     const audioZoneService = new AudioZoneService(socket, getSharedState());
+    const soccerService = new SoccerService(socket, io);
 
     // Start listening
     chatService.listenForMessage();
@@ -191,6 +193,7 @@ async function startServer() {
     gameService.listenForGameEvents(userMap);
     pollService.listenForPollEvents();
     audioZoneService.listen();
+    soccerService.listenForSoccerEvents();
 
     socketTransports[socket.id] = [];
 
