@@ -10,10 +10,9 @@ import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
 import type { User } from "../index.js";
 import { SoccerService } from "./soccer.service.js";
 
-// In-memory player positions Shared across all socket instances)
+// In-memory player positions (Shared across all socket instances)
 const playerPositions: Map<string, PlayerState> = new Map();
 
-// Export player positions for other services (e.g., soccer collision detection)
 export function getPlayerPositions(): Map<string, PlayerState> {
   return playerPositions;
 }
@@ -25,8 +24,8 @@ export class GameService {
   private lastMovementTime: number = 0;
 
   // Max 20 updates/sec.
-  // it's the tickrate of the front end 1000/50 = 20
   private readonly MOVEMENT_THROTTLE_MS = 50;
+
   constructor(socket: Socket, userId: number) {
     this.socket = socket;
     this.userId = userId;
@@ -46,6 +45,20 @@ export class GameService {
       },
     );
 
+    // NEW: Listen for raw inputs (WASD) for Physics maps
+    this.socket.on(
+      "playerInput",
+      (input: {
+        up: boolean;
+        down: boolean;
+        left: boolean;
+        right: boolean;
+      }) => {
+        this.handlePlayerInput(input);
+      },
+    );
+
+    // Legacy: Keep this for non-physics maps (like MainMap)
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
       this.handlePlayerMovement(data);
     });
@@ -75,24 +88,63 @@ export class GameService {
       },
     );
 
-    // Clean up on disconnect
     this.socket.on("disconnect", () => {
       this.handlePlayerDisconnect();
     });
   }
 
+  // ==========================================
+  // NEW: HANDLE INPUT FOR PHYSICS (SLIDING)
+  // ==========================================
+  private handlePlayerInput(input: {
+    up: boolean;
+    down: boolean;
+    left: boolean;
+    right: boolean;
+  }) {
+    const playerState = playerPositions.get(this.socket.id);
+    if (!playerState || playerState.currentScene !== "SoccerMap") return;
+
+    // 1. Get Physics State (This is where VX/VY live)
+    // Note: You must make `playerPhysics` public static in SoccerService
+    // or add a getter method like `SoccerService.getPlayerPhysics(id)`
+    const physics = SoccerService["playerPhysics"].get(this.socket.id);
+
+    if (physics) {
+      const ACCEL = 20; // Acceleration Force
+      const MAX_SPEED = 600; // Speed Limit
+
+      // 2. Apply Force (Add to velocity)
+      if (input.up) physics.vy -= ACCEL;
+      if (input.down) physics.vy += ACCEL;
+      if (input.left) physics.vx -= ACCEL;
+      if (input.right) physics.vx += ACCEL;
+
+      // 3. Clamp Velocity (Don't go faster than MAX_SPEED)
+      const speed = Math.sqrt(
+        physics.vx * physics.vx + physics.vy * physics.vy,
+      );
+      if (speed > MAX_SPEED) {
+        const scale = MAX_SPEED / speed;
+        physics.vx *= scale;
+        physics.vy *= scale;
+      }
+    }
+  }
+
+  // ==========================================
+  // EXISTING METHODS
+  // ==========================================
+
   private handlePlayerAction(data: PlayerActionData) {
     const playerState = playerPositions.get(this.socket.id);
-    if (!playerState) {
-      return;
-    }
+    if (!playerState) return;
 
     if (data.action === "attack") {
       playerState.isAttacking = true;
       playerPositions.set(this.socket.id, playerState);
     }
 
-    // Broadcast action to players in the same scene
     this.socket.to(`scene:${playerState.currentScene}`).emit("playerAction", {
       playerId: this.socket.id,
       action: data.action,
@@ -109,7 +161,7 @@ export class GameService {
       return;
     }
 
-    const sceneName = data.scene || "MainMap"; // Default to MainMap
+    const sceneName = data.scene || "MainMap";
 
     const playerState: PlayerState = {
       id: this.socket.id,
@@ -125,11 +177,9 @@ export class GameService {
     };
 
     playerPositions.set(this.socket.id, playerState);
-
-    // Join Socket.io room for this scene
     this.socket.join(`scene:${sceneName}`);
 
-    // If joining SoccerMap, add to physics tracking
+    // If joining SoccerMap, initialize physics
     if (sceneName === "SoccerMap") {
       SoccerService.updatePlayerPhysicsState(this.socket.id, {
         x: data.x,
@@ -138,72 +188,48 @@ export class GameService {
         vy: 0,
         radius: 30,
       });
-
-      // Immediately broadcast current physics state to new player
       SoccerService.broadcastInitialPhysicsState(this.socket.id);
     }
 
     console.log(
-      `Player joined: ${user.name} (${this.socket.id}) at (${data.x}, ${data.y}) in scene ${sceneName}`,
+      `Player joined: ${user.name} (${this.socket.id}) in ${sceneName}`,
     );
 
-    // Send only players in the same scene (excluding this player)
     const playersInScene = Array.from(playerPositions.values()).filter(
       (p) => p.currentScene === sceneName && p.id !== this.socket.id,
     );
-    console.log("PLAYERS IN SCENE:", playersInScene.length);
+
     this.socket.emit("currentPlayers", playersInScene);
-
-    // Send the joining player's own state back to them so they can create themselves
     this.socket.emit("newPlayer", playerState);
-
-    // Broadcast to other players in the same scene only
     this.socket.to(`scene:${sceneName}`).emit("newPlayer", playerState);
   }
 
   private handlePlayerMovement(data: PlayerMovementData) {
-    // Throttle movement updates (max 20/sec to prevent spam)
     const now = Date.now();
-    if (now - this.lastMovementTime < this.MOVEMENT_THROTTLE_MS) {
-      return; // Ignore rapid updates
-    }
+    if (now - this.lastMovementTime < this.MOVEMENT_THROTTLE_MS) return;
     this.lastMovementTime = now;
 
     const playerState = playerPositions.get(this.socket.id);
-    if (!playerState) {
-      // If player hasn't joined via playerJoin yet, ignore movement
+    if (!playerState) return;
+
+    // CRITICAL FIX: Ignore client positions for SoccerMap.
+    // We want the server's physics engine to be the authority here.
+    if (playerState.currentScene === "SoccerMap") {
       return;
     }
 
-    // Update position in memory
+    // Normal logic for non-physics maps
     playerState.x = data.x;
     playerState.y = data.y;
     playerState.vx = data.vx;
     playerState.vy = data.vy;
-    // Important: Sync attack state if passed
-    if (data.isAttacking !== undefined) {
+    if (data.isAttacking !== undefined)
       playerState.isAttacking = data.isAttacking;
-    }
-
-    // Update scene if provided
-    if (data.currentScene && data.currentScene !== playerState.currentScene) {
+    if (data.currentScene && data.currentScene !== playerState.currentScene)
       playerState.currentScene = data.currentScene;
-    }
 
     playerPositions.set(this.socket.id, playerState);
 
-    // If in SoccerMap, also update physics state
-    if (playerState.currentScene === "SoccerMap") {
-      SoccerService.updatePlayerPhysicsState(this.socket.id, {
-        x: data.x,
-        y: data.y,
-        vx: data.vx,
-        vy: data.vy,
-        radius: 30, // Match client hitbox
-      });
-    }
-
-    // Broadcast ONLY to players in the same scene
     this.socket.to(`scene:${playerState.currentScene}`).emit("playerMoved", {
       id: this.socket.id,
       ...data,
@@ -215,44 +241,29 @@ export class GameService {
     userMap: Record<string, User>,
   ) {
     try {
-      // Update in database (persisted)
       const updatedCharacter = await this.characterRepository.update(
         this.userId,
         data,
       );
-
-      // Update in-memory userMap
       const user = userMap[this.socket.id];
-      if (user) {
-        user.character = updatedCharacter;
-      }
+      if (user) user.character = updatedCharacter;
 
-      // Update in-memory player state
       const playerState = playerPositions.get(this.socket.id);
       if (playerState) {
         playerState.character = updatedCharacter;
         playerPositions.set(this.socket.id, playerState);
       }
 
-      console.log(
-        `Character updated for user ${this.userId}:`,
-        updatedCharacter,
-      );
-
-      // Broadcast to all players (so they see updated sprite)
       this.socket.broadcast.emit(GameEventEnums.RESPONSE_CHARACTER_UPDATED, {
         playerId: this.socket.id,
         character: updatedCharacter,
       });
-
-      // Confirm to sender
       this.socket.emit(GameEventEnums.RESPONSE_CHARACTER_UPDATED, {
         playerId: this.socket.id,
         character: updatedCharacter,
       });
     } catch (error) {
       console.error("Failed to update character:", error);
-      this.socket.emit("error", { message: "Failed to update character" });
     }
   }
 
@@ -262,26 +273,17 @@ export class GameService {
   ) {
     try {
       const newName = data.name.trim();
+      if (!newName) return;
 
-      if (!newName) {
-        console.error("Name update failed: empty name");
-        return;
-      }
-
-      // Update in-memory userMap
       const user = userMap[this.socket.id];
-      if (user) {
-        user.name = newName;
-      }
+      if (user) user.name = newName;
 
-      // Update in-memory player state
       const playerState = playerPositions.get(this.socket.id);
       if (playerState) {
         playerState.name = newName;
         playerPositions.set(this.socket.id, playerState);
       }
 
-      // Broadcast to all other players (not sender)
       this.socket.broadcast.emit("nameUpdated", {
         playerId: this.socket.id,
         name: newName,
@@ -293,41 +295,27 @@ export class GameService {
 
   private handleSceneChange(data: { newScene: string; x: number; y: number }) {
     const player = playerPositions.get(this.socket.id);
-    if (!player) {
-      console.error("Player not found for scene change:", this.socket.id);
-      return;
-    }
+    if (!player) return;
 
     const oldScene = player.currentScene;
     const newScene = data.newScene;
 
-    console.log(
-      `Player ${player.name} (${this.socket.id}) changing scene from ${oldScene} to ${newScene}`,
-    );
-
-    // Leave old scene room
     this.socket.leave(`scene:${oldScene}`);
-
-    // Notify players in old scene that this player left
     this.socket.to(`scene:${oldScene}`).emit("deletePlayer", {
       id: this.socket.id,
     });
 
-    // If leaving SoccerMap, remove from physics tracking
     if (oldScene === "SoccerMap") {
       SoccerService.removePlayerPhysics(this.socket.id);
     }
 
-    // Update player state
     player.currentScene = newScene;
     player.x = data.x;
     player.y = data.y;
     playerPositions.set(this.socket.id, player);
 
-    // Join new scene room
     this.socket.join(`scene:${newScene}`);
 
-    // If entering SoccerMap, add to physics tracking
     if (newScene === "SoccerMap") {
       SoccerService.updatePlayerPhysicsState(this.socket.id, {
         x: data.x,
@@ -338,34 +326,24 @@ export class GameService {
       });
     }
 
-    // Send current players in new scene
     const playersInScene = Array.from(playerPositions.values()).filter(
       (p) => p.currentScene === newScene && p.id !== this.socket.id,
     );
 
     this.socket.emit("currentPlayers", playersInScene);
-
-    // Notify players in new scene that this player joined
     this.socket.to(`scene:${newScene}`).emit("newPlayer", player);
   }
 
   private handlePlayerDisconnect() {
-    // Remove from in-memory state
     const player = playerPositions.get(this.socket.id);
     if (player) {
       const sceneName = player.currentScene;
-
       playerPositions.delete(this.socket.id);
-      console.log(
-        `Player disconnected and removed: ${this.socket.id} from scene ${sceneName}`,
-      );
 
-      // If in SoccerMap, remove from physics tracking
       if (sceneName === "SoccerMap") {
         SoccerService.removePlayerPhysics(this.socket.id);
       }
 
-      // Notify players in the same scene that this player disconnected
       this.socket.to(`scene:${sceneName}`).emit("deletePlayer", {
         id: this.socket.id,
       });

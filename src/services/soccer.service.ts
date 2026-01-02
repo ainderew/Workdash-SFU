@@ -72,7 +72,7 @@ export class SoccerService {
   // Player physics constants
   private static readonly PLAYER_RADIUS = 30; // Collision radius (matches client hitbox)
   private static readonly PLAYER_MASS = 1.5; // For collision calculations
-  private static readonly PUSH_DAMPING = 1; // Push force on player-player collision (INCREASED from 0.3)
+  private static readonly PUSH_DAMPING = 1.5; // Push force on player-player collision (INCREASED from 0.3)
   private static readonly BALL_KNOCKBACK = 0.6; // Knockback when hit by ball (INCREASED from 0.4)
   private static readonly KICK_KNOCKBACK = 400; // Knockback when kicking (INCREASED from 300)
 
