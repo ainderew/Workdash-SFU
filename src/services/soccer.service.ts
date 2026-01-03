@@ -156,6 +156,14 @@ export class SoccerService {
       this.handleResetGame();
     });
 
+    this.socket.on("soccer:startGame", () => {
+      this.handleStartGame();
+    });
+
+    this.socket.on("soccer:randomizeTeams", () => {
+      this.handleRandomizeTeams();
+    });
+
     this.socket.on("soccer:getPlayers", (callback) => {
       this.handleGetPlayers(callback);
     });
@@ -651,8 +659,8 @@ export class SoccerService {
     this.score = { red: 0, blue: 0 };
     this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
     this.isGameActive = false;
-    this.resetBall();
-    this.resetAllPlayerPositions();
+    this.resetBall(false); // No delay when resetting from game end
+    this.resetAllPlayerPositions(false); // No delay when resetting from game end
   }
 
   private static startGame(io: Server) {
@@ -701,11 +709,11 @@ export class SoccerService {
     // Reset score
     SoccerService.score = { red: 0, blue: 0 };
 
-    // Reset ball position
-    SoccerService.resetBall();
+    // Reset ball position (no delay for manual reset)
+    SoccerService.resetBall(false);
 
-    // Reset all player positions to their team spawns
-    SoccerService.resetAllPlayerPositions();
+    // Reset all player positions to their team spawns (no delay for manual reset)
+    SoccerService.resetAllPlayerPositions(false);
 
     // Start the game timer
     SoccerService.startGame(this.io);
@@ -715,7 +723,71 @@ export class SoccerService {
       score: SoccerService.score,
     });
 
-    console.log("Soccer game reset - score: 0-0, timer started");
+    console.log("Soccer game reset - score: 0-0, timer started (instant reset)");
+  }
+
+  private handleStartGame() {
+    // Just start the timer without resetting score or positions
+    SoccerService.startGame(this.io);
+    console.log("Soccer game started - timer activated");
+  }
+
+  private handleRandomizeTeams() {
+    const playerPositions = getPlayerPositions();
+
+    // Get all players in the SoccerMap scene
+    const soccerPlayers = Array.from(playerPositions.values())
+      .filter((p) => p.currentScene === "SoccerMap");
+
+    if (soccerPlayers.length === 0) {
+      console.log("No players to randomize");
+      return;
+    }
+
+    // Shuffle players using Fisher-Yates algorithm
+    const shuffled = [...soccerPlayers];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    // Split evenly between red and blue teams
+    const midpoint = Math.ceil(shuffled.length / 2);
+    const redTeam = shuffled.slice(0, midpoint);
+    const blueTeam = shuffled.slice(midpoint);
+
+    // Assign teams
+    redTeam.forEach((player) => {
+      player.team = "red";
+      playerPositions.set(player.id, player);
+
+      // Reset to red team spawn
+      SoccerService.resetPlayerPosition(player.id, "red");
+
+      // Broadcast team assignment
+      this.io.to("scene:SoccerMap").emit("soccer:teamAssigned", {
+        playerId: player.id,
+        team: "red",
+      });
+    });
+
+    blueTeam.forEach((player) => {
+      player.team = "blue";
+      playerPositions.set(player.id, player);
+
+      // Reset to blue team spawn
+      SoccerService.resetPlayerPosition(player.id, "blue");
+
+      // Broadcast team assignment
+      this.io.to("scene:SoccerMap").emit("soccer:teamAssigned", {
+        playerId: player.id,
+        team: "blue",
+      });
+    });
+
+    console.log(
+      `Randomized teams: ${redTeam.length} red, ${blueTeam.length} blue`,
+    );
   }
 
   private handleGetPlayers(callback: (players: any[]) => void) {
@@ -974,9 +1046,8 @@ export class SoccerService {
     }
   }
 
-  public static resetBall() {
-    this.hasScoredGoal = true;
-    setTimeout(() => {
+  public static resetBall(withDelay: boolean = true) {
+    const resetAction = () => {
       this.ballState = {
         x: this.WORLD_BOUNDS.width / 2,
         y: this.WORLD_BOUNDS.height / 2,
@@ -989,7 +1060,14 @@ export class SoccerService {
 
       this.hasScoredGoal = false;
       console.log("Ball reset to center");
-    }, 3000);
+    };
+
+    if (withDelay) {
+      this.hasScoredGoal = true;
+      setTimeout(resetAction, 3000);
+    } else {
+      resetAction();
+    }
   }
 
   public static getScore() {
@@ -1044,8 +1122,8 @@ export class SoccerService {
   }
 
   // Reset all players to their team spawn positions
-  private static resetAllPlayerPositions() {
-    setTimeout(() => {
+  private static resetAllPlayerPositions(withDelay: boolean = true) {
+    const resetAction = () => {
       const playerPositions = getPlayerPositions();
       const redTeamPlayers: string[] = [];
       const blueTeamPlayers: string[] = [];
@@ -1123,6 +1201,12 @@ export class SoccerService {
       console.log(
         `Reset ${redTeamPlayers.length} red team and ${blueTeamPlayers.length} blue team players`,
       );
-    }, 3000);
+    };
+
+    if (withDelay) {
+      setTimeout(resetAction, 3000);
+    } else {
+      resetAction();
+    }
   }
 }
