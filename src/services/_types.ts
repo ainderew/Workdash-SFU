@@ -147,6 +147,7 @@ export type BallDribbleData = {
 export type SkillActivationData = {
   playerId: string;
   skillId: string;
+  facingDirection?: string; // For blink and directional skills
 };
 
 export type SkillActivatedEvent = {
@@ -166,4 +167,13 @@ export type SkillActivatedEvent = {
 export type SkillEndedEvent = {
   activatorId: string;
   skillId: string;
+};
+
+export type BlinkActivatedEvent = {
+  activatorId: string;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  visualConfig: any;
 };

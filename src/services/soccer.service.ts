@@ -850,6 +850,64 @@ export class SoccerService {
     const playerPositions = getPlayerPositions();
     const affectedPlayers: string[] = [];
 
+    // Handle blink skill (instant teleport)
+    if (skillConfig.serverEffect.type === "blink") {
+      const params = skillConfig.serverEffect.params;
+      const activatorPhysics = SoccerService.playerPhysics.get(data.playerId);
+      const activatorState = playerPositions.get(data.playerId);
+
+      if (activatorPhysics && activatorState && data.facingDirection) {
+        const startX = activatorPhysics.x;
+        const startY = activatorPhysics.y;
+
+        // Calculate target position
+        const direction = SoccerService.getFacingVector(data.facingDirection);
+        let targetX = startX + direction.dx * params.distance;
+        let targetY = startY + direction.dy * params.distance;
+
+        // Check wall collision
+        if (params.preventWallClip) {
+          const collision = SoccerService.checkBlinkCollision(
+            startX,
+            startY,
+            targetX,
+            targetY,
+          );
+          if (collision) {
+            targetX = collision.x;
+            targetY = collision.y;
+          }
+        }
+
+        // Update physics and state
+        activatorPhysics.x = targetX;
+        activatorPhysics.y = targetY;
+        activatorPhysics.vx = 0;
+        activatorPhysics.vy = 0;
+
+        activatorState.x = targetX;
+        activatorState.y = targetY;
+        activatorState.vx = 0;
+        activatorState.vy = 0;
+
+        // Broadcast blink event (different from skillActivated)
+        this.io.to("scene:SoccerMap").emit("soccer:blinkActivated", {
+          activatorId: data.playerId,
+          fromX: startX,
+          fromY: startY,
+          toX: targetX,
+          toY: targetY,
+          visualConfig: skillConfig.clientVisuals,
+        });
+
+        console.log(
+          `Player ${data.playerId} blinked from (${startX}, ${startY}) to (${targetX}, ${targetY})`,
+        );
+
+        return; // Skip normal skill activation broadcast
+      }
+    }
+
     // Apply skill effect based on type
     if (isSpeedEffect(skillConfig.serverEffect.params)) {
       const multiplier = skillConfig.serverEffect.params.multiplier;
@@ -1146,6 +1204,47 @@ export class SoccerService {
       return slowSkill.serverEffect.params.multiplier;
     }
     return 1.0; // Default no effect
+  }
+
+  // Convert facing direction to movement vector
+  private static getFacingVector(facing: string): { dx: number; dy: number } {
+    switch (facing) {
+      case "UP":
+        return { dx: 0, dy: -1 };
+      case "DOWN":
+        return { dx: 0, dy: 1 };
+      case "LEFT":
+        return { dx: -1, dy: 0 };
+      case "RIGHT":
+        return { dx: 1, dy: 0 };
+      default:
+        return { dx: 0, dy: 1 }; // Default to DOWN
+    }
+  }
+
+  // Check if blink destination would collide with a wall
+  private static checkBlinkCollision(
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+  ): { x: number; y: number } | null {
+    // Check if endpoint is inside any collision rect
+    for (const rect of this.collisionRects) {
+      if (
+        endX >= rect.x &&
+        endX <= rect.x + rect.width &&
+        endY >= rect.y &&
+        endY <= rect.y + rect.height
+      ) {
+        // Collision detected, return start position (don't blink)
+        console.log(
+          `Blink blocked by wall at (${endX}, ${endY}), staying at (${startX}, ${startY})`,
+        );
+        return { x: startX, y: startY };
+      }
+    }
+    return null; // No collision
   }
 
   // Broadcast current physics state to a specific player (for joins)

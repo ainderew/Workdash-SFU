@@ -1,14 +1,20 @@
 // Soccer Skills Configuration
 // Single source of truth for all skill definitions
 
-export type SkillEffectType = 'speed_slow' | 'speed_boost' | 'knockback' | 'stun';
+export type SkillEffectType =
+  | "speed_slow"
+  | "speed_boost"
+  | "knockback"
+  | "stun"
+  | "blink";
 
 // Effect parameters (discriminated union for type safety)
 export type SkillEffectParams =
-  | { type: 'speed_slow'; multiplier: number }
-  | { type: 'speed_boost'; multiplier: number }
-  | { type: 'knockback'; force: number; radius: number }
-  | { type: 'stun'; duration: number };
+  | { type: "speed_slow"; multiplier: number }
+  | { type: "speed_boost"; multiplier: number }
+  | { type: "knockback"; force: number; radius: number }
+  | { type: "stun"; duration: number }
+  | { type: "blink"; distance: number; preventWallClip: boolean };
 
 // Base skill configuration
 export interface SkillConfig {
@@ -39,18 +45,18 @@ export interface SkillConfig {
 // Skill registry
 export const SOCCER_SKILLS: Record<string, SkillConfig> = {
   slowdown: {
-    id: 'slowdown',
-    name: 'Time Dilation',
-    description: 'Slow all other players to 10% speed for 5 seconds',
-    keyBinding: 'Q',
+    id: "slowdown",
+    name: "Time Dilation",
+    description: "Slow all other players to 10% speed for 5 seconds",
+    keyBinding: "Q",
     cooldownMs: 30000, // 30 seconds
     durationMs: 5000, // 5 seconds
 
     serverEffect: {
-      type: 'speed_slow',
+      type: "speed_slow",
       params: {
-        type: 'speed_slow',
-        multiplier: 0.1, // 10% speed
+        type: "speed_slow",
+        multiplier: 0.35,
       },
     },
 
@@ -60,7 +66,35 @@ export const SOCCER_SKILLS: Record<string, SkillConfig> = {
       trailColor: 0x00ffff, // Cyan
       trailInterval: 30,
       trailFadeDuration: 300,
-      sfxKey: 'skill_slowdown',
+      sfxKey: "skill_slowdown",
+    },
+  },
+
+  blink: {
+    id: "blink",
+    name: "Blink",
+    description:
+      "Instantly teleport a short distance in the direction you are facing",
+    keyBinding: "E",
+    cooldownMs: 12000, // 12 seconds
+    durationMs: 0, // Instant effect, no duration
+
+    serverEffect: {
+      type: "blink",
+      params: {
+        type: "blink",
+        distance: 300, // pixels
+        preventWallClip: true,
+      },
+    },
+
+    clientVisuals: {
+      enableGrayscale: false,
+      enableSpeedTrail: true,
+      trailColor: 0x00ffff, // Purple
+      trailInterval: 15,
+      trailFadeDuration: 500,
+      sfxKey: "skill_blink",
     },
   },
 
@@ -81,6 +115,6 @@ export function getAllSkills(): SkillConfig[] {
 // Type guard for speed effect
 export function isSpeedEffect(
   effect: SkillEffectParams,
-): effect is { type: 'speed_slow' | 'speed_boost'; multiplier: number } {
-  return effect.type === 'speed_slow' || effect.type === 'speed_boost';
+): effect is { type: "speed_slow" | "speed_boost"; multiplier: number } {
+  return effect.type === "speed_slow" || effect.type === "speed_boost";
 }
