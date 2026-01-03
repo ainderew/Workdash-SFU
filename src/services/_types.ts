@@ -142,3 +142,28 @@ export type BallDribbleData = {
   playerVx: number;
   playerVy: number;
 };
+
+// Skill system types
+export type SkillActivationData = {
+  playerId: string;
+  skillId: string;
+};
+
+export type SkillActivatedEvent = {
+  activatorId: string;
+  skillId: string;
+  affectedPlayers: string[];
+  duration: number;
+  visualConfig: {
+    enableGrayscale: boolean;
+    enableSpeedTrail: boolean;
+    trailColor?: number;
+    trailInterval?: number;
+    trailFadeDuration?: number;
+  };
+};
+
+export type SkillEndedEvent = {
+  activatorId: string;
+  skillId: string;
+};

@@ -116,7 +116,12 @@ export class GameService {
     if (physics) {
       // Apply speed stat multiplier (1 point = 0.1x boost, range 1.0x-2.5x)
       const speedStat = physics.soccerStats?.speed ?? 0;
-      const speedMultiplier = 1.0 + speedStat * 0.1;
+      let speedMultiplier = 1.0 + speedStat * 0.1;
+
+      // Apply slow skill multiplier if player is slowed
+      if (SoccerService.isPlayerSlowed(this.socket.id)) {
+        speedMultiplier *= SoccerService.getSlowMultiplier();
+      }
 
       const ACCEL = 1600 * speedMultiplier; // Acceleration Force with stat multiplier
       const MAX_SPEED = 600 * speedMultiplier; // Speed Limit with stat multiplier

@@ -5,8 +5,14 @@ import type {
   BallKickData,
   BallDribbleData,
   PlayerState,
+  SkillActivationData,
 } from "./_types.js";
 import { getPlayerPositions } from "./game.service.js";
+import {
+  getSkillConfig,
+  getAllSkills,
+  isSpeedEffect,
+} from "../config/soccer-skills.config.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -95,6 +101,12 @@ export class SoccerService {
   private static isGameActive = false;
   private static lastTimerUpdate = Date.now();
 
+  // Skill system
+  // Cooldown tracking: playerId -> (skillId -> timestamp)
+  private static playerSkillCooldowns: Map<string, Map<string, number>> =
+    new Map();
+  private static slowedPlayers: Set<string> = new Set(); // Track players currently slowed
+
   // Team spawn positions
   private static readonly RED_TEAM_SPAWNS = [
     { x: 1413, y: 515 },
@@ -162,6 +174,22 @@ export class SoccerService {
 
     this.socket.on("soccer:randomizeTeams", () => {
       this.handleRandomizeTeams();
+    });
+
+    this.socket.on("soccer:activateSkill", (data: SkillActivationData) => {
+      this.handleActivateSkill(data);
+    });
+
+    this.socket.on("soccer:requestSkillConfig", (callback) => {
+      const skills = getAllSkills().map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        keyBinding: skill.keyBinding,
+        cooldownMs: skill.cooldownMs,
+        durationMs: skill.durationMs,
+        clientVisuals: skill.clientVisuals,
+      }));
+      callback(skills);
     });
 
     this.socket.on("soccer:getPlayers", (callback) => {
@@ -790,6 +818,95 @@ export class SoccerService {
     );
   }
 
+  private handleActivateSkill(data: SkillActivationData) {
+    // Default to 'slowdown' skill for backwards compatibility
+    const skillId = data.skillId || "slowdown";
+    const skillConfig = getSkillConfig(skillId);
+
+    if (!skillConfig) {
+      console.error(`Unknown skill: ${skillId}`);
+      return;
+    }
+
+    const now = Date.now();
+    const playerCooldowns =
+      SoccerService.playerSkillCooldowns.get(data.playerId) || new Map();
+    const lastUsed = playerCooldowns.get(skillId) || 0;
+
+    // Check cooldown
+    if (now - lastUsed < skillConfig.cooldownMs) {
+      const remainingMs = skillConfig.cooldownMs - (now - lastUsed);
+      console.log(
+        `Player ${data.playerId} skill ${skillId} on cooldown: ${Math.ceil(remainingMs / 1000)}s remaining`,
+      );
+      return;
+    }
+
+    // Update cooldown
+    playerCooldowns.set(skillId, now);
+    SoccerService.playerSkillCooldowns.set(data.playerId, playerCooldowns);
+
+    // Get all players in the scene
+    const playerPositions = getPlayerPositions();
+    const affectedPlayers: string[] = [];
+
+    // Apply skill effect based on type
+    if (isSpeedEffect(skillConfig.serverEffect.params)) {
+      const multiplier = skillConfig.serverEffect.params.multiplier;
+
+      for (const [playerId, playerState] of playerPositions.entries()) {
+        if (
+          playerState.currentScene !== "SoccerMap" ||
+          playerId === data.playerId
+        ) {
+          continue;
+        }
+
+        // Mark player as slowed
+        SoccerService.slowedPlayers.add(playerId);
+        affectedPlayers.push(playerId);
+
+        // Also reduce current velocity immediately
+        const playerPhysics = SoccerService.playerPhysics.get(playerId);
+        if (playerPhysics) {
+          playerPhysics.vx *= multiplier;
+          playerPhysics.vy *= multiplier;
+        }
+      }
+    }
+
+    // Broadcast skill activation with visual config
+    this.io.to("scene:SoccerMap").emit("soccer:skillActivated", {
+      activatorId: data.playerId,
+      skillId: skillId,
+      affectedPlayers,
+      duration: skillConfig.durationMs,
+      visualConfig: skillConfig.clientVisuals,
+    });
+
+    console.log(
+      `Player ${data.playerId} activated ${skillId} skill, affecting ${affectedPlayers.length} players for ${skillConfig.durationMs}ms`,
+    );
+
+    // Restore normal speed after duration
+    setTimeout(() => {
+      // Remove slow effect from all affected players
+      for (const playerId of affectedPlayers) {
+        SoccerService.slowedPlayers.delete(playerId);
+      }
+
+      console.log(
+        `Skill ${skillId} duration ended, speed restored for ${affectedPlayers.length} players`,
+      );
+
+      // Broadcast skill end
+      this.io.to("scene:SoccerMap").emit("soccer:skillEnded", {
+        activatorId: data.playerId,
+        skillId: skillId,
+      });
+    }, skillConfig.durationMs);
+  }
+
   private handleGetPlayers(callback: (players: any[]) => void) {
     const playerPositions = getPlayerPositions();
     const soccerPlayers = Array.from(playerPositions.values())
@@ -1015,6 +1132,20 @@ export class SoccerService {
   // Method to remove player from physics tracking
   public static removePlayerPhysics(playerId: string) {
     this.playerPhysics.delete(playerId);
+  }
+
+  // Check if a player is currently affected by slow skill
+  public static isPlayerSlowed(playerId: string): boolean {
+    return this.slowedPlayers.has(playerId);
+  }
+
+  // Get the slow multiplier
+  public static getSlowMultiplier(): number {
+    const slowSkill = getSkillConfig("slowdown");
+    if (slowSkill && isSpeedEffect(slowSkill.serverEffect.params)) {
+      return slowSkill.serverEffect.params.multiplier;
+    }
+    return 1.0; // Default no effect
   }
 
   // Broadcast current physics state to a specific player (for joins)
