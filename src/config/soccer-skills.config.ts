@@ -6,7 +6,9 @@ export type SkillEffectType =
   | "speed_boost"
   | "knockback"
   | "stun"
-  | "blink";
+  | "blink"
+  | "metavision"
+  | "ninja_step";
 
 // Effect parameters (discriminated union for type safety)
 export type SkillEffectParams =
@@ -14,7 +16,9 @@ export type SkillEffectParams =
   | { type: "speed_boost"; multiplier: number }
   | { type: "knockback"; force: number; radius: number }
   | { type: "stun"; duration: number }
-  | { type: "blink"; distance: number; preventWallClip: boolean };
+  | { type: "blink"; distance: number; preventWallClip: boolean }
+  | { type: "metavision" }
+  | { type: "ninja_step" };
 
 // Base skill configuration
 export interface SkillConfig {
@@ -39,6 +43,7 @@ export interface SkillConfig {
     trailInterval?: number; // ms between trail sprites
     trailFadeDuration?: number; // ms for trail fade animation
     sfxKey?: string; // Sound effect key
+    iconKey: string; // Icon filename without extension
   };
 }
 
@@ -66,15 +71,16 @@ export const SOCCER_SKILLS: Record<string, SkillConfig> = {
       trailColor: 0x00ffff, // Cyan
       trailInterval: 30,
       trailFadeDuration: 300,
-      sfxKey: "skill_slowdown",
+      sfxKey: "time_dilation",
+      iconKey: "time_dilation",
     },
   },
 
   blink: {
     id: "blink",
-    name: "Blink",
+    name: "Swift Step",
     description:
-      "Instantly teleport a short distance in the direction you are facing",
+      "Instantly dash a short distance in the direction you are facing",
     keyBinding: "E",
     cooldownMs: 12000, // 12 seconds
     durationMs: 0, // Instant effect, no duration
@@ -94,12 +100,44 @@ export const SOCCER_SKILLS: Record<string, SkillConfig> = {
       trailColor: 0x00ffff, // Purple
       trailInterval: 15,
       trailFadeDuration: 500,
-      sfxKey: "skill_blink",
+      sfxKey: "blink",
+      iconKey: "blink",
     },
   },
 
-  // Future skills can be added here easily
-  // speedBoost: { ... },
+  metavision: {
+    id: "metavision",
+    name: "Metavision",
+    description: "Predict the ball trajectory and bounces",
+    keyBinding: "R",
+    cooldownMs: 15000,
+    durationMs: 5000,
+    serverEffect: { type: "metavision", params: { type: "metavision" } },
+    clientVisuals: {
+      enableGrayscale: false,
+      enableSpeedTrail: false,
+      trailColor: 0x00ffff,
+      sfxKey: "soccer_skill_activation",
+      iconKey: "power_shot",
+    },
+  },
+
+  ninja_step: {
+    id: "ninja_step",
+    name: "Shadow Step",
+    description:
+      "Passive: Phase through enemies when not touching the ball. Become solid when near the ball.",
+    keyBinding: "T",
+    cooldownMs: 0,
+    durationMs: 0,
+    serverEffect: { type: "ninja_step", params: { type: "ninja_step" } },
+    clientVisuals: {
+      enableGrayscale: false,
+      enableSpeedTrail: false,
+      sfxKey: "shadow",
+      iconKey: "shadow",
+    },
+  },
 };
 
 // Helper to get skill by ID

@@ -106,6 +106,8 @@ export class SoccerService {
   private static playerSkillCooldowns: Map<string, Map<string, number>> =
     new Map();
   private static slowedPlayers: Set<string> = new Set(); // Track players currently slowed
+  private static metavisionPlayers: Set<string> = new Set(); // Track players with active metavision
+  private static ninjaStepPlayers: Set<string> = new Set(); // Players who have the Ninja Step passive active
 
   // Team spawn positions
   private static readonly RED_TEAM_SPAWNS = [
@@ -184,6 +186,7 @@ export class SoccerService {
       const skills = getAllSkills().map((skill) => ({
         id: skill.id,
         name: skill.name,
+        description: skill.description,
         keyBinding: skill.keyBinding,
         cooldownMs: skill.cooldownMs,
         durationMs: skill.durationMs,
@@ -208,13 +211,37 @@ export class SoccerService {
       return;
     }
 
+    const ballState = SoccerService.ballState;
+    const kickerPhysics = SoccerService.playerPhysics.get(data.playerId);
+
+    if (!kickerPhysics) return;
+
+    // Check kick range
+    const dx_dist = ballState.x - kickerPhysics.x;
+    const dy_dist = ballState.y - kickerPhysics.y;
+    const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
+
+    // Dynamic threshold: 200px if Metavision is active, 140px otherwise
+    const isMetaVisionActive = SoccerService.metavisionPlayers.has(data.playerId);
+    const kickThreshold = isMetaVisionActive ? 200 : 140;
+
+    if (distance > kickThreshold) {
+      console.log(
+        `Kick rejected for ${data.playerId}: distance ${distance.toFixed(0)} > ${kickThreshold}`,
+      );
+      return;
+    }
+
     SoccerService.lastKickTime = now;
 
-    const ballState = SoccerService.ballState;
-
-    const kickerPhysics = SoccerService.playerPhysics.get(data.playerId);
     const kickPowerStat = kickerPhysics?.soccerStats?.kickPower ?? 0;
-    const kickPowerMultiplier = 1.0 + kickPowerStat * 0.1;
+    let kickPowerMultiplier = 1.0 + kickPowerStat * 0.1;
+
+    // Apply Metavision power boost
+    if (isMetaVisionActive) {
+      kickPowerMultiplier *= 1.2;
+    }
+
     const kickVx = Math.cos(data.angle) * data.kickPower * kickPowerMultiplier;
     const kickVy = Math.sin(data.angle) * data.kickPower * kickPowerMultiplier;
 
@@ -224,18 +251,13 @@ export class SoccerService {
     ballState.lastTouchTimestamp = now;
     ballState.isMoving = true;
 
-    if (kickerPhysics) {
-      const knockbackVx = -Math.cos(data.angle) * SoccerService.KICK_KNOCKBACK;
-      const knockbackVy = -Math.sin(data.angle) * SoccerService.KICK_KNOCKBACK;
-      kickerPhysics.vx += knockbackVx;
-      kickerPhysics.vy += knockbackVy;
-      console.log(
-        `Applied kick knockback to ${data.playerId}: (${knockbackVx.toFixed(0)}, ${knockbackVy.toFixed(0)})`,
-      );
-    }
+    const knockbackVx = -Math.cos(data.angle) * SoccerService.KICK_KNOCKBACK;
+    const knockbackVy = -Math.sin(data.angle) * SoccerService.KICK_KNOCKBACK;
+    kickerPhysics.vx += knockbackVx;
+    kickerPhysics.vy += knockbackVy;
 
     console.log(
-      `Ball kicked by ${data.playerId}: power=${data.kickPower}, angle=${data.angle}`,
+      `Ball kicked by ${data.playerId}${isMetaVisionActive ? " (METAVISION)" : ""}: power=${data.kickPower}, angle=${data.angle.toFixed(2)}, mult=${kickPowerMultiplier.toFixed(2)}`,
     );
 
     this.io.to("scene:SoccerMap").emit(GameEventEnums.BALL_KICKED, {
@@ -446,6 +468,13 @@ export class SoccerService {
   private static updatePlayerPhysics(io: Server, deltaTime: number) {
     const players = Array.from(this.playerPhysics.values());
 
+    const isTouchingBall = (p: PlayerPhysicsState) => {
+      const dx = this.ballState.x - p.x;
+      const dy = this.ballState.y - p.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      return dist < this.BALL_RADIUS + p.radius + 20; // 20px buffer
+    };
+
     /**
      *player collision
      */
@@ -453,6 +482,18 @@ export class SoccerService {
       for (let j = i + 1; j < players.length; j++) {
         const p1 = players[i];
         const p2 = players[j];
+
+        if (!p1 || !p2) continue;
+
+        // Ninja Step: Skip collision if either player is ghosted (has skill and not touching ball)
+        const p1Ghosted =
+          SoccerService.ninjaStepPlayers.has(p1.id) && !isTouchingBall(p1);
+        const p2Ghosted =
+          SoccerService.ninjaStepPlayers.has(p2.id) && !isTouchingBall(p2);
+
+        if (p1Ghosted || p2Ghosted) {
+          continue;
+        }
 
         const dx = p2.x - p1.x;
         const dy = p2.y - p1.y;
@@ -554,6 +595,13 @@ export class SoccerService {
     );
   }
 
+  private static isTouchingBall(p: PlayerPhysicsState) {
+    const dx = this.ballState.x - p.x;
+    const dy = this.ballState.y - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    return dist < this.BALL_RADIUS + p.radius + 20; // 20px buffer
+  }
+
   private static broadcastPlayerStates(io: Server) {
     const updates: any[] = [];
 
@@ -564,6 +612,9 @@ export class SoccerService {
         y: player.y,
         vx: player.vx, // No rounding for velocities
         vy: player.vy,
+        isGhosted:
+          SoccerService.ninjaStepPlayers.has(id) &&
+          !SoccerService.isTouchingBall(player),
       });
     }
 
@@ -774,9 +825,13 @@ export class SoccerService {
 
     // Shuffle players using Fisher-Yates algorithm
     const shuffled = [...soccerPlayers];
-    for (let i = shuffled.length - 1; i > 0; i--) {
+    for (let i = 0; i < shuffled.length - 1; i++) {
       const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      const temp = shuffled[i];
+      if (temp && shuffled[j]) {
+        shuffled[i] = shuffled[j]!;
+        shuffled[j] = temp;
+      }
     }
 
     // Split evenly between red and blue teams
@@ -819,12 +874,27 @@ export class SoccerService {
   }
 
   private handleActivateSkill(data: SkillActivationData) {
-    // Default to 'slowdown' skill for backwards compatibility
-    const skillId = data.skillId || "slowdown";
+    const skillId = data.skillId;
     const skillConfig = getSkillConfig(skillId);
 
-    if (!skillConfig) {
-      console.error(`Unknown skill: ${skillId}`);
+    if (!skillConfig) return;
+
+    // Handle passive skill Ninja Step
+    if (skillId === "ninja_step") {
+      if (SoccerService.ninjaStepPlayers.has(data.playerId)) {
+        SoccerService.ninjaStepPlayers.delete(data.playerId);
+      } else {
+        SoccerService.ninjaStepPlayers.add(data.playerId);
+      }
+
+      // Broadcast toggle event so client can update visuals
+      this.io.to("scene:SoccerMap").emit("soccer:skillActivated", {
+        activatorId: data.playerId,
+        skillId: skillId,
+        affectedPlayers: [],
+        duration: 0,
+        visualConfig: skillConfig.clientVisuals,
+      });
       return;
     }
 
@@ -852,7 +922,11 @@ export class SoccerService {
 
     // Handle blink skill (instant teleport)
     if (skillConfig.serverEffect.type === "blink") {
-      const params = skillConfig.serverEffect.params;
+      const params = skillConfig.serverEffect.params as {
+        type: "blink";
+        distance: number;
+        preventWallClip: boolean;
+      };
       const activatorPhysics = SoccerService.playerPhysics.get(data.playerId);
       const activatorState = playerPositions.get(data.playerId);
 
@@ -942,6 +1016,10 @@ export class SoccerService {
       visualConfig: skillConfig.clientVisuals,
     });
 
+    if (skillId === "metavision") {
+      SoccerService.metavisionPlayers.add(data.playerId);
+    }
+
     console.log(
       `Player ${data.playerId} activated ${skillId} skill, affecting ${affectedPlayers.length} players for ${skillConfig.durationMs}ms`,
     );
@@ -953,8 +1031,12 @@ export class SoccerService {
         SoccerService.slowedPlayers.delete(playerId);
       }
 
+      if (skillId === "metavision") {
+        SoccerService.metavisionPlayers.delete(data.playerId);
+      }
+
       console.log(
-        `Skill ${skillId} duration ended, speed restored for ${affectedPlayers.length} players`,
+        `Skill ${skillId} duration ended for player ${data.playerId}`,
       );
 
       // Broadcast skill end
@@ -1321,7 +1403,7 @@ export class SoccerService {
       (p) => p.team === team && p.currentScene === "SoccerMap",
     );
     const spawnIndex = Math.min(teamPlayers.length - 1, spawns.length - 1);
-    const spawn = spawns[spawnIndex] || spawns[0];
+    const spawn = spawns[spawnIndex] || spawns[0]!;
 
     // Update physics position
     playerPhysics.x = spawn.x;
@@ -1330,8 +1412,8 @@ export class SoccerService {
     playerPhysics.vy = 0;
 
     // Update player state position
-    playerState.x = spawn!.x;
-    playerState.y = spawn!.y;
+    playerState.x = spawn.x;
+    playerState.y = spawn.y;
     playerState.vx = 0;
     playerState.vy = 0;
 
@@ -1341,13 +1423,13 @@ export class SoccerService {
     if (this.ioInstance) {
       this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
         playerId,
-        x: spawn!.x,
-        y: spawn!.y,
+        x: spawn.x,
+        y: spawn.y,
       });
     }
 
     console.log(
-      `Reset ${playerState.name} to ${team} team spawn: (${spawn!.x}, ${spawn!.y})`,
+      `Reset ${playerState.name} to ${team} team spawn: (${spawn.x}, ${spawn.y})`,
     );
   }
 
@@ -1371,7 +1453,7 @@ export class SoccerService {
 
       // Reset red team players
       redTeamPlayers.forEach((playerId, index) => {
-        const spawn = this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length];
+        const spawn = this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length]!;
         const playerPhysics = this.playerPhysics.get(playerId);
         const playerState = playerPositions.get(playerId);
 
@@ -1401,7 +1483,7 @@ export class SoccerService {
       // Reset blue team players
       blueTeamPlayers.forEach((playerId, index) => {
         const spawn =
-          this.BLUE_TEAM_SPAWNS[index % this.BLUE_TEAM_SPAWNS.length];
+          this.BLUE_TEAM_SPAWNS[index % this.BLUE_TEAM_SPAWNS.length]!;
         const playerPhysics = this.playerPhysics.get(playerId);
         const playerState = playerPositions.get(playerId);
 
