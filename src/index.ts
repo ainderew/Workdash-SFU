@@ -21,6 +21,7 @@ import authRoutes from "./routes/auth.route.js";
 import characterRoutes from "./routes/character.route.js";
 import userRoutes from "./routes/user.route.js";
 import settingsRoutes from "./routes/settings.route.js";
+import soccerStatsRoutes from "./routes/soccer-stats.route.js";
 import { httpAuthMiddleware } from "./middleware/http-auth.middlware.js";
 
 dotenv.config();
@@ -33,6 +34,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/character", httpAuthMiddleware, characterRoutes);
 app.use("/api/user", httpAuthMiddleware, userRoutes);
 app.use("/api/settings", httpAuthMiddleware, settingsRoutes);
+app.use("/api/soccer-stats", httpAuthMiddleware, soccerStatsRoutes);
 
 const server = new http.Server(app);
 const io = new Server(server, {

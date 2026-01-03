@@ -43,6 +43,12 @@ export type PlayerPosition = {
   vy: number;
 };
 
+export type SoccerStats = {
+  speed: number;
+  kickPower: number;
+  dribbling: number;
+};
+
 export type PlayerState = PlayerPosition & {
   id: string;
   userId: number;
@@ -50,6 +56,8 @@ export type PlayerState = PlayerPosition & {
   isAttacking: boolean;
   character: Character;
   currentScene: string; // Track which scene/map player is in
+  soccerStats?: SoccerStats | null; // Optional soccer stats for SoccerMap
+  team?: "red" | "blue" | null; // Soccer team assignment
 };
 
 export type PlayerJoinData = {

@@ -6,6 +6,7 @@ import type {
   PlayerActionData,
 } from "./_types.js";
 import { CharacterRepository } from "../repositories/character/character.repository.js";
+import { SoccerStatsRepository } from "../repositories/soccer-stats/soccer-stats.repository.js";
 import type { CharacterUpdateInput } from "@/generated/prisma/models.js";
 import type { User } from "../index.js";
 import { SoccerService } from "./soccer.service.js";
@@ -21,6 +22,7 @@ export class GameService {
   private socket: Socket;
   private userId: number;
   private characterRepository: CharacterRepository;
+  private soccerStatsRepository: SoccerStatsRepository;
   private lastMovementTime: number = 0;
 
   // Max 20 updates/sec.
@@ -30,6 +32,7 @@ export class GameService {
     this.socket = socket;
     this.userId = userId;
     this.characterRepository = new CharacterRepository();
+    this.soccerStatsRepository = new SoccerStatsRepository();
   }
 
   listenForGameEvents(userMap: Record<string, User>) {
@@ -111,8 +114,12 @@ export class GameService {
     const physics = SoccerService["playerPhysics"].get(this.socket.id);
 
     if (physics) {
-      const ACCEL = 20; // Acceleration Force
-      const MAX_SPEED = 600; // Speed Limit
+      // Apply speed stat multiplier (1 point = 0.1x boost, range 1.0x-2.5x)
+      const speedStat = physics.soccerStats?.speed ?? 0;
+      const speedMultiplier = 1.0 + speedStat * 0.1;
+
+      const ACCEL = 1600 * speedMultiplier; // Acceleration Force with stat multiplier
+      const MAX_SPEED = 600 * speedMultiplier; // Speed Limit with stat multiplier
 
       // 2. Apply Force (Add to velocity)
       if (input.up) physics.vy -= ACCEL;
@@ -151,7 +158,7 @@ export class GameService {
     });
   }
 
-  private handlePlayerJoin(
+  private async handlePlayerJoin(
     data: { x: number; y: number; scene?: string },
     userMap: Record<string, User>,
   ) {
@@ -162,6 +169,33 @@ export class GameService {
     }
 
     const sceneName = data.scene || "MainMap";
+
+    // Load soccer stats if joining SoccerMap
+    let soccerStats = null;
+    if (sceneName === "SoccerMap") {
+      try {
+        const stats = await this.soccerStatsRepository.findByUserId(
+          this.userId,
+        );
+        if (stats) {
+          soccerStats = {
+            speed: stats.speed,
+            kickPower: stats.kickPower,
+            dribbling: stats.dribbling,
+          };
+          console.log(
+            `Loaded soccer stats for user ${this.userId}:`,
+            soccerStats,
+          );
+        } else {
+          console.log(
+            `No soccer stats found for user ${this.userId} - will trigger modal`,
+          );
+        }
+      } catch (error) {
+        console.error("Failed to load soccer stats:", error);
+      }
+    }
 
     const playerState: PlayerState = {
       id: this.socket.id,
@@ -174,12 +208,13 @@ export class GameService {
       isAttacking: false,
       character: user.character,
       currentScene: sceneName,
+      soccerStats: soccerStats,
     };
 
     playerPositions.set(this.socket.id, playerState);
     this.socket.join(`scene:${sceneName}`);
 
-    // If joining SoccerMap, initialize physics
+    // If joining SoccerMap, initialize physics with stats
     if (sceneName === "SoccerMap") {
       SoccerService.updatePlayerPhysicsState(this.socket.id, {
         x: data.x,
@@ -187,6 +222,7 @@ export class GameService {
         vx: 0,
         vy: 0,
         radius: 30,
+        soccerStats: soccerStats,
       });
       SoccerService.broadcastInitialPhysicsState(this.socket.id);
     }
