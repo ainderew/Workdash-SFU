@@ -88,6 +88,13 @@ export class SoccerService {
   private static score = { red: 0, blue: 0 };
   private static hasScoredGoal = false;
 
+  // Game timer (in seconds)
+  private static readonly DEFAULT_GAME_TIME = 5 * 60; // 5 minutes
+  private static readonly OVERTIME_DURATION = 1 * 60; // 1 minute
+  private static gameTimeRemaining = SoccerService.DEFAULT_GAME_TIME;
+  private static isGameActive = false;
+  private static lastTimerUpdate = Date.now();
+
   // Team spawn positions
   private static readonly RED_TEAM_SPAWNS = [
     { x: 1413, y: 515 },
@@ -242,6 +249,7 @@ export class SoccerService {
     console.log("Starting soccer ball physics loop at 50Hz");
     this.updateInterval = setInterval(() => {
       this.updateBallPhysics(io);
+      this.updateGameTimer(io);
     }, this.UPDATE_INTERVAL_MS);
   }
 
@@ -580,6 +588,86 @@ export class SoccerService {
     SoccerService.broadcastBallState(this.io);
   }
 
+  private static updateGameTimer(io: Server) {
+    if (!this.isGameActive) return;
+
+    const now = Date.now();
+    const deltaTime = (now - this.lastTimerUpdate) / 1000; // Convert to seconds
+    this.lastTimerUpdate = now;
+
+    this.gameTimeRemaining -= deltaTime;
+
+    // Broadcast timer update every second
+    if (Math.floor(this.gameTimeRemaining) !== Math.floor(this.gameTimeRemaining + deltaTime)) {
+      io.to("scene:SoccerMap").emit("soccer:timerUpdate", {
+        timeRemaining: Math.max(0, Math.floor(this.gameTimeRemaining)),
+      });
+    }
+
+    // Check if time is up
+    if (this.gameTimeRemaining <= 0) {
+      this.handleGameEnd(io);
+    }
+  }
+
+  private static handleGameEnd(io: Server) {
+    this.isGameActive = false;
+
+    // Determine winner
+    let winner: "red" | "blue" | "tie";
+    if (this.score.red > this.score.blue) {
+      winner = "red";
+    } else if (this.score.blue > this.score.red) {
+      winner = "blue";
+    } else {
+      winner = "tie";
+    }
+
+    // If tie, add overtime
+    if (winner === "tie") {
+      console.log("Game tied! Adding 1 minute overtime...");
+      this.gameTimeRemaining = this.OVERTIME_DURATION;
+      this.isGameActive = true;
+      this.lastTimerUpdate = Date.now();
+
+      io.to("scene:SoccerMap").emit("soccer:overtime", {
+        message: "Overtime! 1 minute added",
+        duration: this.OVERTIME_DURATION,
+      });
+    } else {
+      console.log(`Game over! Winner: ${winner.toUpperCase()}`);
+
+      io.to("scene:SoccerMap").emit("soccer:gameEnd", {
+        winner,
+        score: this.score,
+      });
+
+      // Reset game state
+      this.resetGame();
+    }
+  }
+
+  private static resetGame() {
+    this.score = { red: 0, blue: 0 };
+    this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
+    this.isGameActive = false;
+    this.resetBall();
+    this.resetAllPlayerPositions();
+  }
+
+  private static startGame(io: Server) {
+    this.isGameActive = true;
+    this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
+    this.lastTimerUpdate = Date.now();
+    this.score = { red: 0, blue: 0 };
+
+    io.to("scene:SoccerMap").emit("soccer:gameStarted", {
+      duration: this.DEFAULT_GAME_TIME,
+    });
+
+    console.log("Game started! 5 minute timer begins.");
+  }
+
   private handleTeamAssignment(data: {
     playerId: string;
     team: "red" | "blue" | null;
@@ -619,12 +707,15 @@ export class SoccerService {
     // Reset all player positions to their team spawns
     SoccerService.resetAllPlayerPositions();
 
+    // Start the game timer
+    SoccerService.startGame(this.io);
+
     // Broadcast reset to all players
     this.io.to("scene:SoccerMap").emit("soccer:gameReset", {
       score: SoccerService.score,
     });
 
-    console.log("Soccer game reset - score: 0-0");
+    console.log("Soccer game reset - score: 0-0, timer started");
   }
 
   private handleGetPlayers(callback: (players: any[]) => void) {
