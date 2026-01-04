@@ -33,6 +33,7 @@ interface PlayerPhysicsState {
   vx: number;
   vy: number;
   radius: number; // Collision radius
+  team?: "red" | "blue" | "spectator" | null;
   soccerStats?: { speed: number; kickPower: number; dribbling: number } | null;
 }
 interface GoalZone {
@@ -44,9 +45,24 @@ interface GoalZone {
   height: number;
 }
 
+enum GameStatus {
+  LOBBY = "LOBBY",
+  SKILL_SELECTION = "SKILL_SELECTION",
+  ACTIVE = "ACTIVE",
+}
+
 export class SoccerService {
   private socket: Socket;
   private io: Server;
+
+  private static gameStatus: GameStatus = GameStatus.LOBBY;
+  private static selectionOrder: string[] = [];
+  private static currentPickerIndex: number = -1;
+  private static playerAssignedSkills: Map<string, string> = new Map();
+  private static availableSkillIds: string[] = [];
+  private static midGamePickers: Set<string> = new Set();
+  private static selectionTimer: NodeJS.Timeout | null = null;
+  private static selectionTurnEndTime: number = 0;
 
   /**
    * Singleton on purpose do not change please
@@ -71,6 +87,10 @@ export class SoccerService {
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 500; // Prevent spam
   private static readonly MAX_DRIBBLE_DISTANCE = 300; // Max distance for dribble
+
+  private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
+  private static readonly FIELD_LEFT = 550;
+  private static readonly FIELD_RIGHT = 3000;
 
   private static readonly PLAYER_RADIUS = 30;
   private static readonly PLAYER_MASS = 1.5;
@@ -178,6 +198,18 @@ export class SoccerService {
       this.handleRandomizeTeams();
     });
 
+    this.socket.on("soccer:pickSkill", (data: { skillId: string }) => {
+      this.handlePickSkill(data);
+    });
+
+    this.socket.on("soccer:requestGameState", (callback) => {
+      callback({
+        gameStatus: SoccerService.gameStatus,
+        isGameActive: SoccerService.isGameActive,
+        playerPicks: Object.fromEntries(SoccerService.playerAssignedSkills),
+      });
+    });
+
     this.socket.on("soccer:activateSkill", (data: SkillActivationData) => {
       this.handleActivateSkill(data);
     });
@@ -213,8 +245,15 @@ export class SoccerService {
 
     const ballState = SoccerService.ballState;
     const kickerPhysics = SoccerService.playerPhysics.get(data.playerId);
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(data.playerId);
 
-    if (!kickerPhysics) return;
+    if (!kickerPhysics || !playerState) return;
+
+    // Spectators cannot kick
+    if (playerState.team !== "red" && playerState.team !== "blue") {
+      return;
+    }
 
     // Check kick range
     const dx_dist = ballState.x - kickerPhysics.x;
@@ -222,7 +261,9 @@ export class SoccerService {
     const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
 
     // Dynamic threshold: 200px if Metavision is active, 140px otherwise
-    const isMetaVisionActive = SoccerService.metavisionPlayers.has(data.playerId);
+    const isMetaVisionActive = SoccerService.metavisionPlayers.has(
+      data.playerId,
+    );
     const kickThreshold = isMetaVisionActive ? 200 : 140;
 
     if (distance > kickThreshold) {
@@ -276,6 +317,15 @@ export class SoccerService {
     const timeSinceLastKick = now - SoccerService.lastKickTime;
     if (timeSinceLastKick < 100) {
       // Kick takes priority - ignore dribble events for 100ms after a kick
+      return;
+    }
+
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(data.playerId);
+    if (
+      !playerState ||
+      (playerState.team !== "red" && playerState.team !== "blue")
+    ) {
       return;
     }
 
@@ -468,13 +518,6 @@ export class SoccerService {
   private static updatePlayerPhysics(io: Server, deltaTime: number) {
     const players = Array.from(this.playerPhysics.values());
 
-    const isTouchingBall = (p: PlayerPhysicsState) => {
-      const dx = this.ballState.x - p.x;
-      const dy = this.ballState.y - p.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      return dist < this.BALL_RADIUS + p.radius + 20; // 20px buffer
-    };
-
     /**
      *player collision
      */
@@ -487,11 +530,17 @@ export class SoccerService {
 
         // Ninja Step: Skip collision if either player is ghosted (has skill and not touching ball)
         const p1Ghosted =
-          SoccerService.ninjaStepPlayers.has(p1.id) && !isTouchingBall(p1);
+          SoccerService.ninjaStepPlayers.has(p1.id) &&
+          !SoccerService.isTouchingBall(p1);
         const p2Ghosted =
-          SoccerService.ninjaStepPlayers.has(p2.id) && !isTouchingBall(p2);
+          SoccerService.ninjaStepPlayers.has(p2.id) &&
+          !SoccerService.isTouchingBall(p2);
 
-        if (p1Ghosted || p2Ghosted) {
+        // Spectator: Skip collision if either player is a spectator (null, undefined, or "spectator")
+        const p1Spectator = p1.team !== "red" && p1.team !== "blue";
+        const p2Spectator = p2.team !== "red" && p2.team !== "blue";
+
+        if (p1Ghosted || p2Ghosted || p1Spectator || p2Spectator) {
           continue;
         }
 
@@ -523,6 +572,43 @@ export class SoccerService {
     for (const player of players) {
       player.x += player.vx * deltaTime;
       player.y += player.vy * deltaTime;
+
+      // Boundary collision (cannot cross pitch walls)
+      for (const rect of this.collisionRects) {
+        const closestX = Math.max(
+          rect.x,
+          Math.min(player.x, rect.x + rect.width),
+        );
+        const closestY = Math.max(
+          rect.y,
+          Math.min(player.y, rect.y + rect.height),
+        );
+
+        const dx = player.x - closestX;
+        const dy = player.y - closestY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        if (distance < player.radius) {
+          const overlap = player.radius - distance;
+          if (distance > 0) {
+            player.x += (dx / distance) * overlap;
+            player.y += (dy / distance) * overlap;
+          } else {
+            // Inside - push to closest edge
+            const dL = player.x - rect.x;
+            const dR = rect.x + rect.width - player.x;
+            const dT = player.y - rect.y;
+            const dB = rect.y + rect.height - player.y;
+            const min = Math.min(dL, dR, dT, dB);
+            if (min === dL) player.x = rect.x - player.radius;
+            else if (min === dR) player.x = rect.x + rect.width + player.radius;
+            else if (min === dT) player.y = rect.y - player.radius;
+            else player.y = rect.y + rect.height + player.radius;
+          }
+          player.vx = 0;
+          player.vy = 0;
+        }
+      }
     }
 
     for (const player of players) {
@@ -615,6 +701,7 @@ export class SoccerService {
         isGhosted:
           SoccerService.ninjaStepPlayers.has(id) &&
           !SoccerService.isTouchingBall(player),
+        isSpectator: player.team !== "red" && player.team !== "blue",
       });
     }
 
@@ -685,7 +772,10 @@ export class SoccerService {
     this.gameTimeRemaining -= deltaTime;
 
     // Broadcast timer update every second
-    if (Math.floor(this.gameTimeRemaining) !== Math.floor(this.gameTimeRemaining + deltaTime)) {
+    if (
+      Math.floor(this.gameTimeRemaining) !==
+      Math.floor(this.gameTimeRemaining + deltaTime)
+    ) {
       io.to("scene:SoccerMap").emit("soccer:timerUpdate", {
         timeRemaining: Math.max(0, Math.floor(this.gameTimeRemaining)),
       });
@@ -735,11 +825,164 @@ export class SoccerService {
   }
 
   private static resetGame() {
+    this.gameStatus = GameStatus.LOBBY;
+    if (this.selectionTimer) {
+      clearTimeout(this.selectionTimer);
+      this.selectionTimer = null;
+    }
+    this.playerAssignedSkills.clear();
+
     this.score = { red: 0, blue: 0 };
     this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
     this.isGameActive = false;
     this.resetBall(false); // No delay when resetting from game end
     this.resetAllPlayerPositions(false); // No delay when resetting from game end
+  }
+
+  private static startSelectionPhase(io: Server) {
+    if (this.gameStatus !== GameStatus.LOBBY) return;
+
+    this.gameStatus = GameStatus.SKILL_SELECTION;
+    this.playerAssignedSkills.clear();
+    this.availableSkillIds = getAllSkills().map((s) => s.id);
+
+    const playersInScene = Array.from(getPlayerPositions().values()).filter(
+      (p) =>
+        p.currentScene === "SoccerMap" &&
+        (p.team === "red" || p.team === "blue"),
+    );
+
+    // Randomize selection order
+    this.selectionOrder = playersInScene
+      .map((p) => p.id)
+      .sort(() => Math.random() - 0.5);
+
+    this.currentPickerIndex = 0;
+
+    io.to("scene:SoccerMap").emit("soccer:selectionPhaseStarted", {
+      order: this.selectionOrder,
+      availableSkills: this.availableSkillIds,
+    });
+
+    this.nextSelectionTurn(io);
+  }
+
+  private static nextSelectionTurn(io: Server) {
+    if (this.selectionTimer) {
+      clearTimeout(this.selectionTimer);
+      this.selectionTimer = null;
+    }
+
+    if (this.currentPickerIndex >= this.selectionOrder.length) {
+      // All players have picked, start the game
+      this.gameStatus = GameStatus.ACTIVE;
+      this.startGame(io);
+      return;
+    }
+
+    const currentPickerId = this.selectionOrder[this.currentPickerIndex];
+    if (!currentPickerId) {
+      this.currentPickerIndex++;
+      this.nextSelectionTurn(io);
+      return;
+    }
+
+    // Skip if player is no longer on a team
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(currentPickerId);
+    if (
+      !playerState ||
+      (playerState.team !== "red" && playerState.team !== "blue")
+    ) {
+      console.log(
+        `Skipping turn for player ${currentPickerId} as they are no longer on a team`,
+      );
+      this.currentPickerIndex++;
+      this.nextSelectionTurn(io);
+      return;
+    }
+
+    const turnDuration = 30000; // 30 seconds
+    this.selectionTurnEndTime = Date.now() + turnDuration;
+
+    io.to("scene:SoccerMap").emit("soccer:selectionUpdate", {
+      currentPickerId,
+      endTime: this.selectionTurnEndTime,
+      availableSkills: this.availableSkillIds,
+    });
+
+    // Set timeout for auto-random pick
+    this.selectionTimer = setTimeout(() => {
+      this.autoPickSkill(io, currentPickerId);
+    }, turnDuration);
+  }
+
+  private static autoPickSkill(io: Server, playerId: string) {
+    if (this.availableSkillIds.length > 0) {
+      const randomIndex = Math.floor(
+        Math.random() * this.availableSkillIds.length,
+      );
+      const skillId = this.availableSkillIds[randomIndex];
+      if (skillId) {
+        this.performPick(io, playerId, skillId);
+      } else {
+        this.currentPickerIndex++;
+        this.nextSelectionTurn(io);
+      }
+    } else {
+      // No skills left
+      this.currentPickerIndex++;
+      this.nextSelectionTurn(io);
+    }
+  }
+
+  private static performPick(io: Server, playerId: string, skillId: string) {
+    this.playerAssignedSkills.set(playerId, skillId);
+    this.availableSkillIds = this.availableSkillIds.filter(
+      (id) => id !== skillId,
+    );
+
+    io.to("scene:SoccerMap").emit("soccer:skillPicked", {
+      playerId,
+      skillId,
+      availableSkills: this.availableSkillIds,
+    });
+
+    if (this.midGamePickers.has(playerId)) {
+      this.midGamePickers.delete(playerId);
+      // Now that they picked, ensure they are in play (handleTeamAssignment only teleported them to goal)
+      const playerState = getPlayerPositions().get(playerId);
+      if (playerState && playerState.team) {
+        this.resetPlayerPosition(playerId, playerState.team as any);
+      }
+    } else {
+      this.currentPickerIndex++;
+      this.nextSelectionTurn(io);
+    }
+  }
+
+  private handlePickSkill(data: { skillId: string }) {
+    const { skillId } = data;
+    const playerId = this.socket.id;
+
+    if (
+      SoccerService.gameStatus !== GameStatus.SKILL_SELECTION &&
+      SoccerService.gameStatus !== GameStatus.ACTIVE
+    )
+      return;
+
+    if (SoccerService.gameStatus === GameStatus.SKILL_SELECTION) {
+      const currentPickerId =
+        SoccerService.selectionOrder[SoccerService.currentPickerIndex];
+      if (playerId !== currentPickerId) return;
+    } else {
+      // ACTIVE game - check if they are a mid-game picker
+      if (!SoccerService.midGamePickers.has(playerId)) return;
+    }
+
+    if (!SoccerService.availableSkillIds.includes(skillId)) return;
+
+    SoccerService.performPick(this.io, playerId, skillId);
   }
 
   private static startGame(io: Server) {
@@ -763,11 +1006,45 @@ export class SoccerService {
     const playerState = playerPositions.get(data.playerId);
 
     if (playerState && playerState.currentScene === "SoccerMap") {
+      const oldTeam = playerState.team;
       playerState.team = data.team;
       playerPositions.set(data.playerId, playerState);
 
+      // Update physics state team
+      const physics = SoccerService.playerPhysics.get(data.playerId);
+      if (physics) {
+        physics.team = data.team;
+      }
+
+      // Handle transitions for mid-game joins
+      const wasSpectator = oldTeam !== "red" && oldTeam !== "blue";
+      const isNowPlayer = data.team === "red" || data.team === "blue";
+
+      if (wasSpectator && isNowPlayer) {
+        if (SoccerService.gameStatus === GameStatus.SKILL_SELECTION) {
+          // Add to selection order if not already there
+          if (!SoccerService.selectionOrder.includes(data.playerId)) {
+            SoccerService.selectionOrder.push(data.playerId);
+            // If we are at the end of the order, nextSelectionTurn will pick it up
+            this.io.to("scene:SoccerMap").emit("soccer:selectionPhaseStarted", {
+                order: SoccerService.selectionOrder,
+                availableSkills: SoccerService.availableSkillIds,
+            });
+          }
+        } else if (SoccerService.gameStatus === GameStatus.ACTIVE) {
+          // Track that this player is picking mid-game
+          SoccerService.midGamePickers.add(data.playerId);
+          
+          // Trigger mid-game pick
+          this.io.to(data.playerId).emit("soccer:startMidGamePick", {
+              availableSkills: SoccerService.availableSkillIds,
+          });
+        }
+      }
+
       // Reset player position to their team spawn
-      if (data.team) {
+      // SKIP if they are currently picking mid-game (they stay spectator until pick)
+      if (data.team && !SoccerService.midGamePickers.has(data.playerId)) {
         SoccerService.resetPlayerPosition(data.playerId, data.team);
       }
 
@@ -785,38 +1062,30 @@ export class SoccerService {
   }
 
   private handleResetGame() {
-    // Reset score
-    SoccerService.score = { red: 0, blue: 0 };
-
-    // Reset ball position (no delay for manual reset)
-    SoccerService.resetBall(false);
-
-    // Reset all player positions to their team spawns (no delay for manual reset)
-    SoccerService.resetAllPlayerPositions(false);
-
-    // Start the game timer
-    SoccerService.startGame(this.io);
+    // Reset state using static method
+    SoccerService.resetGame();
 
     // Broadcast reset to all players
     this.io.to("scene:SoccerMap").emit("soccer:gameReset", {
       score: SoccerService.score,
     });
 
-    console.log("Soccer game reset - score: 0-0, timer started (instant reset)");
+    console.log("Soccer game reset - back to lobby");
   }
 
   private handleStartGame() {
-    // Just start the timer without resetting score or positions
-    SoccerService.startGame(this.io);
-    console.log("Soccer game started - timer activated");
+    // Instead of starting immediately, start the selection phase
+    SoccerService.startSelectionPhase(this.io);
+    console.log("Soccer selection phase started");
   }
 
   private handleRandomizeTeams() {
     const playerPositions = getPlayerPositions();
 
     // Get all players in the SoccerMap scene
-    const soccerPlayers = Array.from(playerPositions.values())
-      .filter((p) => p.currentScene === "SoccerMap");
+    const soccerPlayers = Array.from(playerPositions.values()).filter(
+      (p) => p.currentScene === "SoccerMap",
+    );
 
     if (soccerPlayers.length === 0) {
       console.log("No players to randomize");
@@ -879,6 +1148,28 @@ export class SoccerService {
 
     if (!skillConfig) return;
 
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(data.playerId);
+    if (!playerState) return;
+
+    // Spectators cannot use skills
+    if (playerState.team !== "red" && playerState.team !== "blue") {
+      return;
+    }
+
+    // Enforce skill ownership ONLY if game is active or in selection
+    if (SoccerService.gameStatus !== GameStatus.LOBBY) {
+      const assignedSkillId = SoccerService.playerAssignedSkills.get(
+        data.playerId,
+      );
+      if (assignedSkillId !== skillId) {
+        console.log(
+          `Player ${data.playerId} tried to use unassigned skill ${skillId}`,
+        );
+        return;
+      }
+    }
+
     // Handle passive skill Ninja Step
     if (skillId === "ninja_step") {
       if (SoccerService.ninjaStepPlayers.has(data.playerId)) {
@@ -917,7 +1208,6 @@ export class SoccerService {
     SoccerService.playerSkillCooldowns.set(data.playerId, playerCooldowns);
 
     // Get all players in the scene
-    const playerPositions = getPlayerPositions();
     const affectedPlayers: string[] = [];
 
     // Handle blink skill (instant teleport)
@@ -1263,8 +1553,37 @@ export class SoccerService {
       } | null;
     },
   ) {
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(playerId);
+
+    if (playerState) {
+      if (this.gameStatus !== GameStatus.LOBBY || !playerState.team) {
+        playerState.team = "spectator" as any;
+        state.x = this.SPECTATOR_SPAWN.x;
+        state.y = this.SPECTATOR_SPAWN.y;
+        playerState.x = state.x;
+        playerState.y = state.y;
+
+        // Broadcast team assignment to all players in SoccerMap
+        if (this.ioInstance) {
+          this.ioInstance.to("scene:SoccerMap").emit("soccer:teamAssigned", {
+            playerId: playerId,
+            team: "spectator",
+            playerName: playerState.name,
+          });
+
+          this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
+            playerId: playerId,
+            x: state.x,
+            y: state.y,
+          });
+        }
+      }
+    }
+
     this.playerPhysics.set(playerId, {
       id: playerId,
+      team: playerState?.team || null,
       ...state,
     });
   }
@@ -1387,33 +1706,46 @@ export class SoccerService {
   }
 
   // Reset a single player to their team spawn position
-  private static resetPlayerPosition(playerId: string, team: "red" | "blue") {
+  private static resetPlayerPosition(
+    playerId: string,
+    team: "red" | "blue" | "spectator",
+  ) {
     const playerPositions = getPlayerPositions();
     const playerPhysics = this.playerPhysics.get(playerId);
     const playerState = playerPositions.get(playerId);
 
     if (!playerState || !playerPhysics) return;
 
-    // Get team spawns
-    const spawns =
-      team === "red" ? this.RED_TEAM_SPAWNS : this.BLUE_TEAM_SPAWNS;
+    let targetX: number;
+    let targetY: number;
 
-    // Count how many players are already on this team
-    const teamPlayers = Array.from(playerPositions.values()).filter(
-      (p) => p.team === team && p.currentScene === "SoccerMap",
-    );
-    const spawnIndex = Math.min(teamPlayers.length - 1, spawns.length - 1);
-    const spawn = spawns[spawnIndex] || spawns[0]!;
+    if (team === "spectator") {
+      targetX = this.SPECTATOR_SPAWN.x;
+      targetY = this.SPECTATOR_SPAWN.y;
+    } else {
+      // Get team spawns
+      const spawns =
+        team === "red" ? this.RED_TEAM_SPAWNS : this.BLUE_TEAM_SPAWNS;
+
+      // Count how many players are already on this team
+      const teamPlayers = Array.from(playerPositions.values()).filter(
+        (p) => p.team === team && p.currentScene === "SoccerMap",
+      );
+      const spawnIndex = Math.min(teamPlayers.length - 1, spawns.length - 1);
+      const spawn = spawns[spawnIndex] || spawns[0]!;
+      targetX = spawn.x;
+      targetY = spawn.y;
+    }
 
     // Update physics position
-    playerPhysics.x = spawn.x;
-    playerPhysics.y = spawn.y;
+    playerPhysics.x = targetX;
+    playerPhysics.y = targetY;
     playerPhysics.vx = 0;
     playerPhysics.vy = 0;
 
     // Update player state position
-    playerState.x = spawn.x;
-    playerState.y = spawn.y;
+    playerState.x = targetX;
+    playerState.y = targetY;
     playerState.vx = 0;
     playerState.vy = 0;
 
@@ -1423,13 +1755,13 @@ export class SoccerService {
     if (this.ioInstance) {
       this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
         playerId,
-        x: spawn.x,
-        y: spawn.y,
+        x: targetX,
+        y: targetY,
       });
     }
 
     console.log(
-      `Reset ${playerState.name} to ${team} team spawn: (${spawn.x}, ${spawn.y})`,
+      `Reset ${playerState.name} to ${team} position: (${targetX}, ${targetY})`,
     );
   }
 
@@ -1453,7 +1785,8 @@ export class SoccerService {
 
       // Reset red team players
       redTeamPlayers.forEach((playerId, index) => {
-        const spawn = this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length]!;
+        const spawn =
+          this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length]!;
         const playerPhysics = this.playerPhysics.get(playerId);
         const playerState = playerPositions.get(playerId);
 

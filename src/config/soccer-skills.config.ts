@@ -118,7 +118,7 @@ export const SOCCER_SKILLS: Record<string, SkillConfig> = {
       enableSpeedTrail: false,
       trailColor: 0x00ffff,
       sfxKey: "soccer_skill_activation",
-      iconKey: "power_shot",
+      iconKey: "metavision",
     },
   },
 
