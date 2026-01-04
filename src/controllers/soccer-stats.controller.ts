@@ -16,8 +16,7 @@ export const getSoccerStats = async (req: Request, res: Response) => {
 
     // Return null if no stats exist (triggers modal on client)
     return res.status(200).json(stats);
-  } catch (error) {
-    console.error("Failed to fetch soccer stats:", error);
+  } catch {
     return res.status(500).json({ error: "Failed to fetch soccer stats" });
   }
 };
@@ -59,13 +58,11 @@ export const createSoccerStats = async (req: Request, res: Response) => {
     });
 
     return res.status(201).json(newStats);
-  } catch (error: any) {
-    console.error("Failed to create soccer stats:", error);
-
-    // Return validation errors to client
+  } catch (error) {
     if (
-      error.message?.includes("Total points") ||
-      error.message?.includes("must be")
+      error instanceof Error &&
+      (error.message?.includes("Total points") ||
+        error.message?.includes("must be"))
     ) {
       return res.status(400).json({ error: error.message });
     }

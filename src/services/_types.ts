@@ -57,7 +57,7 @@ export type PlayerState = PlayerPosition & {
   character: Character;
   currentScene: string; // Track which scene/map player is in
   soccerStats?: SoccerStats | null; // Optional soccer stats for SoccerMap
-  team?: "red" | "blue" | null; // Soccer team assignment
+  team?: "red" | "blue" | "spectator"; // Soccer team assignment
 };
 
 export type PlayerJoinData = {
@@ -169,11 +169,11 @@ export type SkillEndedEvent = {
   skillId: string;
 };
 
-export type BlinkActivatedEvent = {
-  activatorId: string;
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-  visualConfig: any;
-};
+// export type BlinkActivatedEvent = {
+//   activatorId: string;
+//   fromX: number;
+//   fromY: number;
+//   toX: number;
+//   toY: number;
+//   visualConfig: any;
+// };
