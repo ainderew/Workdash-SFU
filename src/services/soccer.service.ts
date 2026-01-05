@@ -51,6 +51,12 @@ enum GameStatus {
   ACTIVE = "ACTIVE",
 }
 
+interface PlayerMatchStats {
+  goals: number;
+  assists: number;
+  interceptions: number;
+}
+
 export class SoccerService {
   private socket: Socket;
   private io: Server;
@@ -64,15 +70,18 @@ export class SoccerService {
   private static selectionTimer: NodeJS.Timeout | null = null;
   private static selectionTurnEndTime: number = 0;
 
+  private static playerMatchStats: Map<string, PlayerMatchStats> = new Map();
+
   /**
    * Singleton on purpose do not change please
    */
-  private static ballState: BallState = {
+  private static ballState: BallState & { previousTouchId: string | null } = {
     x: 1760,
     y: 800,
     vx: 0,
     vy: 0,
     lastTouchId: null,
+    previousTouchId: null,
     lastTouchTimestamp: 0,
     isMoving: false,
   };
@@ -94,13 +103,12 @@ export class SoccerService {
   private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
   // private static readonly FIELD_LEFT = 550;
   // private static readonly FIELD_RIGHT = 3000;
-  private static readonly PLAYER_RADIUS = 30;
   // private static readonly PLAYER_MASS = 1.5;
+  private static readonly PLAYER_RADIUS = 30;
   private static readonly PUSH_DAMPING = 1.5;
   private static readonly BALL_KNOCKBACK = 0.6;
   private static readonly KICK_KNOCKBACK = 400;
 
-  // Update loop management
   private static updateInterval: NodeJS.Timeout | null = null;
   private static activeConnections = 0;
   private static lastKickTime = 0;
@@ -116,7 +124,7 @@ export class SoccerService {
   private static score = { red: 0, blue: 0 };
   private static hasScoredGoal = false;
 
-  private static readonly DEFAULT_GAME_TIME = 5 * 60;
+  private static readonly DEFAULT_GAME_TIME = 0.3 * 60;
   private static readonly OVERTIME_DURATION = 1 * 60;
   private static gameTimeRemaining = SoccerService.DEFAULT_GAME_TIME;
   private static isGameActive = false;
@@ -307,7 +315,10 @@ export class SoccerService {
 
     ballState.vx = kickVx;
     ballState.vy = kickVy;
-    ballState.lastTouchId = data.playerId;
+    if (ballState.lastTouchId !== data.playerId) {
+      ballState.previousTouchId = ballState.lastTouchId;
+      ballState.lastTouchId = data.playerId;
+    }
     ballState.lastTouchTimestamp = now;
     ballState.isMoving = true;
 
@@ -364,7 +375,10 @@ export class SoccerService {
 
     ballState.vx = Math.cos(angle) * dribblePower;
     ballState.vy = Math.sin(angle) * dribblePower;
-    ballState.lastTouchId = data.playerId;
+    if (ballState.lastTouchId !== data.playerId) {
+      ballState.previousTouchId = ballState.lastTouchId;
+      ballState.lastTouchId = data.playerId;
+    }
     ballState.lastTouchTimestamp = Date.now();
     ballState.isMoving = true;
 
@@ -456,6 +470,42 @@ export class SoccerService {
         if (this.checkBallGoalCollision(ball, goal) && !this.hasScoredGoal) {
           const scoringTeam = goal.team === "red" ? "blue" : "red";
           this.score[scoringTeam]++;
+
+          // Record Goal
+          if (ball.lastTouchId) {
+            const stats = this.playerMatchStats.get(ball.lastTouchId) || {
+              goals: 0,
+              assists: 0,
+              interceptions: 0,
+            };
+            stats.goals++;
+            this.playerMatchStats.set(ball.lastTouchId, stats);
+            console.log(
+              `Goal recorded for ${ball.lastTouchId}! Total: ${stats.goals}`,
+            );
+
+            // Record Assist
+            if (ball.previousTouchId) {
+              const scorerState = getPlayerPositions().get(ball.lastTouchId);
+              const assisterState = getPlayerPositions().get(
+                ball.previousTouchId,
+              );
+              if (
+                scorerState &&
+                assisterState &&
+                scorerState.team === assisterState.team
+              ) {
+                const assistStats = this.playerMatchStats.get(
+                  ball.previousTouchId,
+                ) || { goals: 0, assists: 0, interceptions: 0 };
+                assistStats.assists++;
+                this.playerMatchStats.set(ball.previousTouchId, assistStats);
+                console.log(
+                  `Assist recorded for ${ball.previousTouchId}! Total: ${assistStats.assists}`,
+                );
+              }
+            }
+          }
 
           console.log(
             `GOAL! ${scoringTeam.toUpperCase()} team scored! Score: Red ${this.score.red} - Blue ${this.score.blue}`,
@@ -774,7 +824,27 @@ export class SoccerService {
     ball.x += nx * (overlap + 1);
     ball.y += ny * (overlap + 1);
 
-    ball.lastTouchId = playerId;
+    if (ball.lastTouchId !== playerId) {
+      // Interception logic
+      const previousKickerState = ball.lastTouchId
+        ? getPlayerPositions().get(ball.lastTouchId)
+        : null;
+      if (previousKickerState && previousKickerState.team !== player.team) {
+        const stats = this.playerMatchStats.get(playerId) || {
+          goals: 0,
+          assists: 0,
+          interceptions: 0,
+        };
+        stats.interceptions++;
+        this.playerMatchStats.set(playerId, stats);
+        console.log(
+          `Interception recorded for ${playerId}! Total: ${stats.interceptions}`,
+        );
+      }
+
+      ball.previousTouchId = ball.lastTouchId;
+      ball.lastTouchId = playerId;
+    }
     ball.lastTouchTimestamp = Date.now();
 
     const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
@@ -839,9 +909,36 @@ export class SoccerService {
         duration: this.OVERTIME_DURATION,
       });
     } else {
+      // Calculate MVP
+      let mvp: {
+        id: string;
+        name: string;
+        stats: PlayerMatchStats;
+        character: any;
+      } | null = null;
+      let highestScore = -1;
+
+      for (const [playerId, stats] of this.playerMatchStats.entries()) {
+        const score =
+          stats.goals * 10 + stats.assists * 5 + stats.interceptions * 2;
+        if (score > highestScore) {
+          highestScore = score;
+          const playerState = getPlayerPositions().get(playerId);
+          if (playerState) {
+            mvp = {
+              id: playerId,
+              name: playerState.name,
+              stats,
+              character: playerState.character,
+            };
+          }
+        }
+      }
+
       io.to("scene:SoccerMap").emit("soccer:gameEnd", {
         winner,
         score: this.score,
+        mvp,
       });
 
       this.resetGame();
@@ -855,6 +952,7 @@ export class SoccerService {
       this.selectionTimer = null;
     }
     this.playerAssignedSkills.clear();
+    this.playerMatchStats.clear();
 
     this.score = { red: 0, blue: 0 };
     this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
@@ -1874,6 +1972,7 @@ export class SoccerService {
         vx: 0,
         vy: 0,
         lastTouchId: null,
+        previousTouchId: null,
         lastTouchTimestamp: 0,
         isMoving: false,
       };
