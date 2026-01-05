@@ -129,7 +129,7 @@ export class SoccerService {
   private static score = { red: 0, blue: 0 };
   private static hasScoredGoal = false;
 
-  private static readonly DEFAULT_GAME_TIME = 0.3 * 60;
+  private static readonly DEFAULT_GAME_TIME = 5 * 60;
   private static readonly OVERTIME_DURATION = 1 * 60;
   private static gameTimeRemaining = SoccerService.DEFAULT_GAME_TIME;
   private static isGameActive = false;
@@ -1012,8 +1012,10 @@ export class SoccerService {
               assists: stats.assists,
               interceptions: stats.interceptions,
               rankAtTime: calculation.newRank,
-              ourScore: player.team === "red" ? this.score.red : this.score.blue,
-              opponentScore: player.team === "red" ? this.score.blue : this.score.red,
+              ourScore:
+                player.team === "red" ? this.score.red : this.score.blue,
+              opponentScore:
+                player.team === "red" ? this.score.blue : this.score.red,
             });
 
             mmrUpdates.push({
@@ -1028,7 +1030,10 @@ export class SoccerService {
               featCount,
             });
           } catch (error) {
-            console.error(`Failed to process MMR for player ${playerId}:`, error);
+            console.error(
+              `Failed to process MMR for player ${playerId}:`,
+              error,
+            );
           }
         }
 
@@ -1095,7 +1100,10 @@ export class SoccerService {
       this.selectionTimer = null;
     }
 
-    if (this.currentPickerIndex >= this.selectionOrder.length || this.availableSkillIds.length === 0) {
+    if (
+      this.currentPickerIndex >= this.selectionOrder.length ||
+      this.availableSkillIds.length === 0
+    ) {
       this.gameStatus = GameStatus.ACTIVE;
       this.startGame(io);
       return;
