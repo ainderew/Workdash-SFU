@@ -47,6 +47,8 @@ export type SoccerStats = {
   speed: number;
   kickPower: number;
   dribbling: number;
+  mmr: number;
+  winStreak: number;
 };
 
 export type PlayerState = PlayerPosition & {

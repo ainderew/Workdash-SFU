@@ -8,6 +8,35 @@ export class SoccerStatsRepository {
     });
   }
 
+  async updateMmr(
+    userId: number,
+    data: { mmr: number; winStreak: number },
+  ): Promise<SoccerStats> {
+    return await prisma.soccerStats.update({
+      where: { userId },
+      data: {
+        mmr: data.mmr,
+        winStreak: data.winStreak,
+      },
+    });
+  }
+
+  async addMatchHistory(data: {
+    userId: number;
+    result: string;
+    isMVP: boolean;
+    mmrDelta: number;
+    newMmr: number;
+    goals: number;
+    assists: number;
+    interceptions: number;
+    rankAtTime: string;
+  }) {
+    return await prisma.matchHistory.create({
+      data,
+    });
+  }
+
   async create(
     userId: number,
     data: { speed: number; kickPower: number; dribbling: number },

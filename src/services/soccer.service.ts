@@ -6,13 +6,17 @@ import type {
   BallDribbleData,
   PlayerState,
   SkillActivationData,
+  SoccerStats,
 } from "./_types.js";
+import type { Character } from "@prisma/client";
 import { getPlayerPositions } from "./game.service.js";
 import {
   getSkillConfig,
   getAllSkills,
   isSpeedEffect,
 } from "../config/soccer-skills.config.js";
+import { MmrSystem, MatchResult } from "./mmr.service.js";
+import { SoccerStatsRepository } from "../repositories/soccer-stats/soccer-stats.repository.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -60,6 +64,7 @@ interface PlayerMatchStats {
 export class SoccerService {
   private socket: Socket;
   private io: Server;
+  private static statsRepository = new SoccerStatsRepository();
 
   private static gameStatus: GameStatus = GameStatus.LOBBY;
   private static selectionOrder: string[] = [];
@@ -914,7 +919,7 @@ export class SoccerService {
         id: string;
         name: string;
         stats: PlayerMatchStats;
-        character: any;
+        character: Character;
       } | null = null;
       let highestScore = -1;
 
@@ -935,12 +940,106 @@ export class SoccerService {
         }
       }
 
-      io.to("scene:SoccerMap").emit("soccer:gameEnd", {
-        winner,
-        score: this.score,
-        mvp,
-      });
+      // --- MMR Calculation System ---
+      const mmrUpdates: Array<{
+        playerId: string;
+        name: string;
+        delta: number;
+        newMmr: number;
+        rank: string;
+        streak: number;
+        stats: PlayerMatchStats;
+        isMVP: boolean;
+        featCount: number;
+      }> = [];
+      const playerPositions = getPlayerPositions();
 
+      // Process MMR for everyone in the scene who was on a team
+      const processMmr = async () => {
+        for (const [playerId, player] of playerPositions.entries()) {
+          if (
+            player.currentScene !== "SoccerMap" ||
+            (player.team !== "red" && player.team !== "blue")
+          ) {
+            continue;
+          }
+
+          const matchResult =
+            player.team === winner ? MatchResult.WIN : MatchResult.LOSS;
+          const isMVP = mvp?.id === playerId;
+          const stats = this.playerMatchStats.get(playerId) || {
+            goals: 0,
+            assists: 0,
+            interceptions: 0,
+          };
+
+          // Calculate feats
+          let featCount = 0;
+          if (stats.goals >= 2) featCount++; // Sniper
+          if (stats.assists >= 2) featCount++; // Playmaker
+          if (stats.interceptions >= 3) featCount++; // Guardian
+
+          try {
+            // Get current persistent stats
+            const dbStats = await SoccerService.statsRepository.findByUserId(
+              player.userId,
+            );
+            const currentMmr = dbStats?.mmr ?? MmrSystem.INITIAL_MMR;
+            const currentStreak = dbStats?.winStreak ?? 0;
+
+            const calculation = MmrSystem.calculateMatchResult(
+              currentMmr,
+              currentStreak,
+              matchResult,
+              isMVP,
+              featCount,
+            );
+
+            // Update Database
+            await SoccerService.statsRepository.updateMmr(player.userId, {
+              mmr: calculation.newMMR,
+              winStreak: calculation.newStreak,
+            });
+
+            // Log Match History
+            await SoccerService.statsRepository.addMatchHistory({
+              userId: player.userId,
+              result: matchResult,
+              isMVP,
+              mmrDelta: calculation.mmrDelta,
+              newMmr: calculation.newMMR,
+              goals: stats.goals,
+              assists: stats.assists,
+              interceptions: stats.interceptions,
+              rankAtTime: calculation.newRank,
+            });
+
+            mmrUpdates.push({
+              playerId,
+              name: player.name,
+              delta: calculation.mmrDelta,
+              newMmr: calculation.newMMR,
+              rank: calculation.newRank,
+              streak: calculation.newStreak,
+              stats,
+              isMVP,
+              featCount,
+            });
+          } catch (error) {
+            console.error(`Failed to process MMR for player ${playerId}:`, error);
+          }
+        }
+
+        // Broadcast everything
+        io.to("scene:SoccerMap").emit("soccer:gameEnd", {
+          winner,
+          score: this.score,
+          mvp,
+          mmrUpdates,
+        });
+      };
+
+      processMmr();
       this.resetGame();
     }
   }
@@ -1832,11 +1931,7 @@ export class SoccerService {
       vx: number;
       vy: number;
       radius: number;
-      soccerStats?: {
-        speed: number;
-        kickPower: number;
-        dribbling: number;
-      } | null;
+      soccerStats?: SoccerStats | null;
     },
   ) {
     const playerPositions = getPlayerPositions();

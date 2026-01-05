@@ -86,8 +86,8 @@ export class GameService {
 
     this.socket.on(
       GameEventEnums.SCENE_CHANGE,
-      (data: { newScene: string; x: number; y: number }) => {
-        this.handleSceneChange(data);
+      async (data: { newScene: string; x: number; y: number }) => {
+        await this.handleSceneChange(data);
       },
     );
 
@@ -176,7 +176,7 @@ export class GameService {
     const sceneName = data.scene || "MainMap";
 
     // Load soccer stats if joining SoccerMap
-    let soccerStats = null;
+    let soccerStats: PlayerState["soccerStats"] = null;
     if (sceneName === "SoccerMap") {
       try {
         const stats = await this.soccerStatsRepository.findByUserId(
@@ -187,6 +187,8 @@ export class GameService {
             speed: stats.speed,
             kickPower: stats.kickPower,
             dribbling: stats.dribbling,
+            mmr: stats.mmr,
+            winStreak: stats.winStreak,
           };
           console.log(
             `Loaded soccer stats for user ${this.userId}:`,
@@ -334,7 +336,7 @@ export class GameService {
     }
   }
 
-  private handleSceneChange(data: { newScene: string; x: number; y: number }) {
+  private async handleSceneChange(data: { newScene: string; x: number; y: number }) {
     const player = playerPositions.get(this.socket.id);
     if (!player) return;
 
@@ -353,19 +355,38 @@ export class GameService {
     player.currentScene = newScene;
     player.x = data.x;
     player.y = data.y;
-    playerPositions.set(this.socket.id, player);
-
-    this.socket.join(`scene:${newScene}`);
 
     if (newScene === "SoccerMap") {
+      try {
+        const stats = await this.soccerStatsRepository.findByUserId(
+          this.userId,
+        );
+        if (stats) {
+          player.soccerStats = {
+            speed: stats.speed,
+            kickPower: stats.kickPower,
+            dribbling: stats.dribbling,
+            mmr: stats.mmr,
+            winStreak: stats.winStreak,
+          };
+        }
+      } catch (error) {
+        console.error("Failed to load soccer stats on scene change:", error);
+      }
+
       SoccerService.updatePlayerPhysicsState(this.socket.id, {
         x: data.x,
         y: data.y,
         vx: 0,
         vy: 0,
         radius: 30,
+        soccerStats: player.soccerStats ?? null,
       });
     }
+
+    playerPositions.set(this.socket.id, player);
+
+    this.socket.join(`scene:${newScene}`);
 
     const playersInScene = Array.from(playerPositions.values()).filter(
       (p) => p.currentScene === newScene && p.id !== this.socket.id,
