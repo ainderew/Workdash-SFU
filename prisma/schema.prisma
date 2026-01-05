@@ -118,6 +118,8 @@ model MatchHistory {
   assists         Int      @default(0)
   interceptions   Int      @default(0)
   rankAtTime      String
+  ourScore        Int      @default(0)
+  opponentScore   Int      @default(0)
   
   @@index([userId])
 }

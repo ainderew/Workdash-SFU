@@ -1012,6 +1012,8 @@ export class SoccerService {
               assists: stats.assists,
               interceptions: stats.interceptions,
               rankAtTime: calculation.newRank,
+              ourScore: player.team === "red" ? this.score.red : this.score.blue,
+              opponentScore: player.team === "red" ? this.score.blue : this.score.red,
             });
 
             mmrUpdates.push({
@@ -1093,7 +1095,7 @@ export class SoccerService {
       this.selectionTimer = null;
     }
 
-    if (this.currentPickerIndex >= this.selectionOrder.length) {
+    if (this.currentPickerIndex >= this.selectionOrder.length || this.availableSkillIds.length === 0) {
       this.gameStatus = GameStatus.ACTIVE;
       this.startGame(io);
       return;

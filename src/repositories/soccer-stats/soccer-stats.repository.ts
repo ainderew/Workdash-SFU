@@ -8,6 +8,14 @@ export class SoccerStatsRepository {
     });
   }
 
+  async getMatchHistory(userId: number, limit = 20) {
+    return await prisma.matchHistory.findMany({
+      where: { userId },
+      orderBy: { matchDate: "desc" },
+      take: limit,
+    });
+  }
+
   async updateMmr(
     userId: number,
     data: { mmr: number; winStreak: number },
@@ -31,6 +39,8 @@ export class SoccerStatsRepository {
     assists: number;
     interceptions: number;
     rankAtTime: string;
+    ourScore: number;
+    opponentScore: number;
   }) {
     return await prisma.matchHistory.create({
       data,

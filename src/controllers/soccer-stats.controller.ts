@@ -21,6 +21,22 @@ export const getSoccerStats = async (req: Request, res: Response) => {
   }
 };
 
+export const getMatchHistory = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as AuthenticatedRequest).userId;
+
+    if (!userId) {
+      return res.status(401).json({ error: "User ID missing from token" });
+    }
+
+    const history = await soccerStatsRepository.getMatchHistory(userId);
+    return res.status(200).json(history);
+  } catch (error) {
+    console.error("Error fetching match history:", error);
+    return res.status(500).json({ error: "Failed to fetch match history" });
+  }
+};
+
 export const createSoccerStats = async (req: Request, res: Response) => {
   try {
     const userId = (req as AuthenticatedRequest).userId;
