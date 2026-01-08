@@ -99,7 +99,7 @@ export class SoccerService {
  *TODO: figure out centralized tickrate management
  for base game do 20HZ for soccer 60hz 
  */
-  private static readonly UPDATE_INTERVAL_MS = 50; // 60Hz update rate
+  private static readonly UPDATE_INTERVAL_MS = 16.6; // 60Hz update rate
   private static readonly VELOCITY_THRESHOLD = 10;
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 300;

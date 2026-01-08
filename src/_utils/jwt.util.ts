@@ -10,7 +10,7 @@ export interface JwtPayload {
 
 export class JwtUtil {
   private static secret = process.env.JWT_SECRET || "fallback-secret-dev-only";
-  private static expiresIn = process.env.JWT_EXPIRES_IN || "7d";
+  private static expiresIn = process.env.JWT_EXPIRES_IN || "30d";
 
   static sign(payload: Omit<JwtPayload, "iat" | "exp">): string {
     if (
