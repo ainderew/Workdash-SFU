@@ -129,12 +129,15 @@ export type BallState = {
   lastTouchId: string | null;
   lastTouchTimestamp: number;
   isMoving: boolean;
+  sequence?: number;
 };
 
 export type BallKickData = {
   playerId: string;
   kickPower: number;
   angle: number;
+  timestamp?: number;
+  sequence?: number;
 };
 
 export type BallDribbleData = {
@@ -143,6 +146,8 @@ export type BallDribbleData = {
   playerY: number;
   playerVx: number;
   playerVy: number;
+  timestamp?: number;
+  sequence?: number;
 };
 
 // Skill system types

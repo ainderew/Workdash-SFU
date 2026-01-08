@@ -61,6 +61,12 @@ interface PlayerMatchStats {
   interceptions: number;
 }
 
+interface PlayerHistoryState {
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
 export class SoccerService {
   private socket: Socket;
   private io: Server;
@@ -89,6 +95,7 @@ export class SoccerService {
     previousTouchId: null,
     lastTouchTimestamp: 0,
     isMoving: false,
+    sequence: 0,
   };
 
   // exponential drag v(t) = v0 * e^(-DRAG * t)
@@ -126,8 +133,16 @@ export class SoccerService {
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
   private static playerInputs: Map<
     string,
-    { up: boolean; down: boolean; left: boolean; right: boolean }
+    {
+      up: boolean;
+      down: boolean;
+      left: boolean;
+      right: boolean;
+      sequence: number;
+    }
   > = new Map();
+  private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
+  private static lastProcessedSequence: Map<string, number> = new Map();
   private static ioInstance: Server | null = null;
 
   private static goalZones: GoalZone[] = [];
@@ -287,9 +302,39 @@ export class SoccerService {
       return;
     }
 
+    // Lag Compensation: Rewind player to their position at data.timestamp
+    let validatedX = kickerPhysics.x;
+    let validatedY = kickerPhysics.y;
+
+    if (data.timestamp) {
+      const history = SoccerService.playerHistory.get(data.playerId);
+      if (history && history.length > 0) {
+        // Find the history entry closest to the timestamp
+        let closest = history[0];
+        if (closest) {
+          let minDiff = Math.abs(data.timestamp - closest.timestamp);
+          for (const entry of history) {
+            const diff = Math.abs(data.timestamp - entry.timestamp);
+            if (diff < minDiff) {
+              minDiff = diff;
+              closest = entry;
+            }
+          }
+          // Only use rewind if it's within a reasonable window (e.g. 500ms)
+          if (minDiff < 500 && closest) {
+            validatedX = closest.x;
+            validatedY = closest.y;
+            console.log(
+              `Lag Comp: Rewound player ${data.playerId} to position at ${data.timestamp} (diff: ${minDiff}ms)`,
+            );
+          }
+        }
+      }
+    }
+
     // Check kick range
-    const dx_dist = ballState.x - kickerPhysics.x;
-    const dy_dist = ballState.y - kickerPhysics.y;
+    const dx_dist = ballState.x - validatedX;
+    const dy_dist = ballState.y - validatedY;
     const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
 
     const isMetaVisionActive = SoccerService.metavisionPlayers.has(
@@ -325,6 +370,7 @@ export class SoccerService {
 
     ballState.vx = kickVx;
     ballState.vy = kickVy;
+    ballState.sequence = (ballState.sequence || 0) + 1;
     if (ballState.lastTouchId !== data.playerId) {
       ballState.previousTouchId = ballState.lastTouchId;
       ballState.lastTouchId = data.playerId;
@@ -590,6 +636,7 @@ export class SoccerService {
       vy: this.ballState.vy,
       lastTouchId: this.ballState.lastTouchId,
       timestamp: Date.now(),
+      sequence: this.ballState.sequence,
     });
   }
 
@@ -754,6 +801,29 @@ export class SoccerService {
         }
       }
     }
+
+    /**
+     * 4. Record History for Lag Compensation
+     */
+    const now = Date.now();
+    for (const player of players) {
+      let history = this.playerHistory.get(player.id);
+      if (!history) {
+        history = [];
+        this.playerHistory.set(player.id, history);
+      }
+
+      history.push({
+        x: player.x,
+        y: player.y,
+        timestamp: now,
+      });
+
+      // Keep 1 second of history (approx 60 ticks)
+      if (history.length > 60) {
+        history.shift();
+      }
+    }
   }
 
   private static handlePlayerCollision(
@@ -831,6 +901,7 @@ export class SoccerService {
       vy: number;
       isGhosted: boolean;
       isSpectator: boolean;
+      lastSequence: number;
     }> = [];
 
     for (const [id, player] of this.playerPhysics.entries()) {
@@ -844,6 +915,7 @@ export class SoccerService {
           SoccerService.ninjaStepPlayers.has(id) &&
           !SoccerService.isTouchingBall(player),
         isSpectator: player.team !== "red" && player.team !== "blue",
+        lastSequence: this.lastProcessedSequence.get(id) || 0,
       });
     }
 
@@ -2043,9 +2115,23 @@ export class SoccerService {
 
   public static updatePlayerInput(
     playerId: string,
-    input: { up: boolean; down: boolean; left: boolean; right: boolean },
+    input: {
+      up: boolean;
+      down: boolean;
+      left: boolean;
+      right: boolean;
+      sequence?: number;
+    },
   ) {
-    this.playerInputs.set(playerId, input);
+    const sequence = input.sequence || 0;
+    this.playerInputs.set(playerId, {
+      up: input.up,
+      down: input.down,
+      left: input.left,
+      right: input.right,
+      sequence,
+    });
+    this.lastProcessedSequence.set(playerId, sequence);
   }
 
   public static removePlayerPhysics(playerId: string) {
