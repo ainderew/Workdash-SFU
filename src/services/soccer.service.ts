@@ -96,19 +96,16 @@ export class SoccerService {
   private static readonly BOUNCE = 0.7;
   private static readonly BALL_RADIUS = 30;
   /**
- *TODO: figure out centralized tickrate management
- for base game do 20HZ for soccer 60hz 
- */
-  private static readonly UPDATE_INTERVAL_MS = 16.6; // 60Hz update rate
+   * Physics runs at 60Hz (16.6ms)
+   * Network broadcasts are throttled to 20Hz
+   */
+  private static readonly UPDATE_INTERVAL_MS = 16.6; // 60Hz
   private static readonly VELOCITY_THRESHOLD = 10;
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 300;
   private static readonly MAX_DRIBBLE_DISTANCE = 300;
 
   private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
-  // private static readonly FIELD_LEFT = 550;
-  // private static readonly FIELD_RIGHT = 3000;
-  // private static readonly PLAYER_MASS = 1.5;
   private static readonly PLAYER_RADIUS = 30;
   private static readonly PUSH_DAMPING = 1.5;
   private static readonly BALL_KNOCKBACK = 0.6;
@@ -117,6 +114,7 @@ export class SoccerService {
   private static updateInterval: NodeJS.Timeout | null = null;
   private static activeConnections = 0;
   private static lastKickTime = 0;
+  private static tickCount = 0; // Throttling counter
 
   private static collisionRects: CollisionRect[] = [];
   private static mapLoaded = false;
@@ -136,7 +134,6 @@ export class SoccerService {
   private static lastTimerUpdate = Date.now();
 
   // Skill system
-  // Cooldown tracking: playerId -> (skillId -> timestamp)
   private static playerSkillCooldowns: Map<string, Map<string, number>> =
     new Map();
   private static slowedPlayers: Set<string> = new Set();
@@ -351,7 +348,6 @@ export class SoccerService {
     const now = Date.now();
     const timeSinceLastKick = now - SoccerService.lastKickTime;
     if (timeSinceLastKick < 100) {
-      // Kick takes priority - ignore dribble events for 100ms after a kick
       return;
     }
 
@@ -393,8 +389,16 @@ export class SoccerService {
 
   private static startPhysicsLoop(io: Server) {
     this.updateInterval = setInterval(() => {
+      // 1. Run Physics (60Hz) - Keeps simulation accurate
       this.updateBallPhysics(io);
       this.updateGameTimer(io);
+
+      // 2. Throttle Network Broadcasts (20Hz) - Sends every 3rd frame
+      this.tickCount++;
+      if (this.tickCount % 3 === 0) {
+        SoccerService.broadcastBallState(io);
+        SoccerService.broadcastPlayerStates(io);
+      }
     }, this.UPDATE_INTERVAL_MS);
   }
 
@@ -528,6 +532,8 @@ export class SoccerService {
 
           this.resetBall();
           this.resetAllPlayerPositions();
+
+          // Force broadcast update immediately on goal
           this.broadcastBallState(io);
 
           return;
@@ -561,11 +567,7 @@ export class SoccerService {
       }
     }
 
-    // Update player physics always runs, even when ball is stationary
     this.updatePlayerPhysics(io, dt);
-
-    SoccerService.broadcastBallState(io);
-    SoccerService.broadcastPlayerStates(io);
   }
 
   private static broadcastBallState(io: Server) {
@@ -583,7 +585,7 @@ export class SoccerService {
     const players = Array.from(this.playerPhysics.values());
 
     /**
-     *player collision
+     * player collision
      */
     for (let i = 0; i < players.length; i++) {
       for (let j = i + 1; j < players.length; j++) {
@@ -1484,7 +1486,7 @@ export class SoccerService {
               targetY: interceptY,
             });
 
-            //don't wait for the next tick
+            // don't wait for the next tick
             SoccerService.broadcastBallState(this.io);
             SoccerService.broadcastPlayerStates(this.io);
             return;
