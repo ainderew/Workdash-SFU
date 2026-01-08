@@ -67,6 +67,12 @@ interface PlayerHistoryState {
   timestamp: number;
 }
 
+interface BallHistoryState {
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
 export class SoccerService {
   private socket: Socket;
   private io: Server;
@@ -123,6 +129,8 @@ export class SoccerService {
 
   private static updateInterval: NodeJS.Timeout | null = null;
   private static lastTickTime = Date.now();
+  private static accumulator = 0;
+  private static readonly PHYSICS_TICK_MS = 16.666; // Fixed 60Hz
   private static activeConnections = 0;
   private static lastKickTime = 0;
   private static tickCount = 0; // Throttling counter
@@ -142,6 +150,7 @@ export class SoccerService {
     }
   > = new Map();
   private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
+  private static ballHistory: BallHistoryState[] = [];
   private static lastProcessedSequence: Map<string, number> = new Map();
   private static ioInstance: Server | null = null;
 
@@ -302,39 +311,60 @@ export class SoccerService {
       return;
     }
 
-    // Lag Compensation: Rewind player to their position at data.timestamp
-    let validatedX = kickerPhysics.x;
-    let validatedY = kickerPhysics.y;
+    // Lag Compensation: Rewind both player and ball to their positions at data.timestamp
+    let validatedPlayerX = kickerPhysics.x;
+    let validatedPlayerY = kickerPhysics.y;
+    let validatedBallX = ballState.x;
+    let validatedBallY = ballState.y;
 
     if (data.timestamp) {
-      const history = SoccerService.playerHistory.get(data.playerId);
-      if (history && history.length > 0) {
-        // Find the history entry closest to the timestamp
-        let closest = history[0];
+      // 1. Rewind Player
+      const playerHistory = SoccerService.playerHistory.get(data.playerId);
+      if (playerHistory && playerHistory.length > 0) {
+        let closest = playerHistory[0];
         if (closest) {
           let minDiff = Math.abs(data.timestamp - closest.timestamp);
-          for (const entry of history) {
+          for (const entry of playerHistory) {
             const diff = Math.abs(data.timestamp - entry.timestamp);
             if (diff < minDiff) {
               minDiff = diff;
               closest = entry;
             }
           }
-          // Only use rewind if it's within a reasonable window (e.g. 500ms)
           if (minDiff < 500 && closest) {
-            validatedX = closest.x;
-            validatedY = closest.y;
-            console.log(
-              `Lag Comp: Rewound player ${data.playerId} to position at ${data.timestamp} (diff: ${minDiff}ms)`,
-            );
+            validatedPlayerX = closest.x;
+            validatedPlayerY = closest.y;
           }
         }
       }
+
+      // 2. Rewind Ball
+      if (SoccerService.ballHistory.length > 0) {
+        let closestBall = SoccerService.ballHistory[0];
+        if (closestBall) {
+          let minDiff = Math.abs(data.timestamp - closestBall.timestamp);
+          for (const entry of SoccerService.ballHistory) {
+            const diff = Math.abs(data.timestamp - entry.timestamp);
+            if (diff < minDiff) {
+              minDiff = diff;
+              closestBall = entry;
+            }
+          }
+          if (minDiff < 500 && closestBall) {
+            validatedBallX = closestBall.x;
+            validatedBallY = closestBall.y;
+          }
+        }
+      }
+
+      console.log(
+        `Lag Comp: Kick validation rewound to ${data.timestamp} (Player: ${validatedPlayerX.toFixed(0)},${validatedPlayerY.toFixed(0)} | Ball: ${validatedBallX.toFixed(0)},${validatedBallY.toFixed(0)})`,
+      );
     }
 
-    // Check kick range
-    const dx_dist = ballState.x - validatedX;
-    const dy_dist = ballState.y - validatedY;
+    // Check kick range using rewound positions
+    const dx_dist = validatedBallX - validatedPlayerX;
+    const dy_dist = validatedBallY - validatedPlayerY;
     const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
 
     const isMetaVisionActive = SoccerService.metavisionPlayers.has(
@@ -443,22 +473,59 @@ export class SoccerService {
 
   private static startPhysicsLoop(io: Server) {
     this.lastTickTime = Date.now();
+    this.accumulator = 0;
+
     this.updateInterval = setInterval(() => {
       const now = Date.now();
-      const dt = (now - this.lastTickTime) / 1000;
+      let frameTime = now - this.lastTickTime;
+      if (frameTime > 250) frameTime = 250; // Clamp to avoid spiral of death
       this.lastTickTime = now;
 
-      // 1. Run Physics with actual dt
-      this.updateBallPhysics(io, dt);
-      this.updateGameTimer(io, dt);
+      this.accumulator += frameTime;
 
-      // 2. Throttle Network Broadcasts (20Hz) - Sends every 3rd frame
+      while (this.accumulator >= this.PHYSICS_TICK_MS) {
+        const dt = this.PHYSICS_TICK_MS / 1000;
+
+        // 1. Run Physics with fixed dt
+        this.updateBallPhysics(io, dt);
+        this.updateGameTimer(io, dt);
+
+        // Record history for lag comp (every tick)
+        this.recordHistory();
+
+        this.accumulator -= this.PHYSICS_TICK_MS;
+      }
+
+      // 2. Throttle Network Broadcasts (20Hz) - Sends approx every 3rd real-time frame
+      // We broadcast the latest state after running the fixed steps
       this.tickCount++;
       if (this.tickCount % 3 === 0) {
         SoccerService.broadcastBallState(io);
         SoccerService.broadcastPlayerStates(io);
       }
-    }, this.UPDATE_INTERVAL_MS);
+    }, 16); // Interval remains 16ms for 60Hz target
+  }
+
+  private static recordHistory() {
+    const now = Date.now();
+    const players = Array.from(this.playerPhysics.values());
+
+    for (const player of players) {
+      let history = this.playerHistory.get(player.id);
+      if (!history) {
+        history = [];
+        this.playerHistory.set(player.id, history);
+      }
+      history.push({ x: player.x, y: player.y, timestamp: now });
+      if (history.length > 60) history.shift(); // 1 second
+    }
+
+    this.ballHistory.push({
+      x: this.ballState.x,
+      y: this.ballState.y,
+      timestamp: now,
+    });
+    if (this.ballHistory.length > 60) this.ballHistory.shift();
   }
 
   private static updateBallPhysics(io: Server, dt: number) {
@@ -799,29 +866,6 @@ export class SoccerService {
             player.vy = 0;
           }
         }
-      }
-    }
-
-    /**
-     * 4. Record History for Lag Compensation
-     */
-    const now = Date.now();
-    for (const player of players) {
-      let history = this.playerHistory.get(player.id);
-      if (!history) {
-        history = [];
-        this.playerHistory.set(player.id, history);
-      }
-
-      history.push({
-        x: player.x,
-        y: player.y,
-        timestamp: now,
-      });
-
-      // Keep 1 second of history (approx 60 ticks)
-      if (history.length > 60) {
-        history.shift();
       }
     }
   }
