@@ -570,10 +570,10 @@ export class SoccerService {
 
   private static broadcastBallState(io: Server) {
     io.to("scene:SoccerMap").emit(GameEventEnums.BALL_STATE, {
-      x: Math.round(this.ballState.x),
-      y: Math.round(this.ballState.y),
-      vx: Math.round(this.ballState.vx),
-      vy: Math.round(this.ballState.vy),
+      x: this.ballState.x,
+      y: this.ballState.y,
+      vx: this.ballState.vx,
+      vy: this.ballState.vy,
       lastTouchId: this.ballState.lastTouchId,
       timestamp: Date.now(),
     });

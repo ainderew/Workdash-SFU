@@ -255,8 +255,6 @@ export class GameService {
     const playerState = playerPositions.get(this.socket.id);
     if (!playerState) return;
 
-    // CRITICAL FIX: Ignore client positions for SoccerMap.
-    // We want the server's physics engine to be the authority here.
     if (playerState.currentScene === "SoccerMap") {
       return;
     }
@@ -336,7 +334,11 @@ export class GameService {
     }
   }
 
-  private async handleSceneChange(data: { newScene: string; x: number; y: number }) {
+  private async handleSceneChange(data: {
+    newScene: string;
+    x: number;
+    y: number;
+  }) {
     const player = playerPositions.get(this.socket.id);
     if (!player) return;
 
