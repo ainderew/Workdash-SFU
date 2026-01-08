@@ -403,12 +403,9 @@ export class SoccerService {
       this.updateBallPhysics(io, dt);
       this.updateGameTimer(io, dt);
 
-      // 2. Throttle Network Broadcasts (20Hz) - Sends every 3rd frame
-      this.tickCount++;
-      if (this.tickCount % 3 === 0) {
-        SoccerService.broadcastBallState(io);
-        SoccerService.broadcastPlayerStates(io);
-      }
+      // 2. Broadcast every tick (60Hz) for smooth gameplay
+      SoccerService.broadcastBallState(io);
+      SoccerService.broadcastPlayerStates(io);
     }, this.UPDATE_INTERVAL_MS);
   }
 
