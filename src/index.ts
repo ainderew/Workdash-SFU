@@ -197,6 +197,10 @@ async function startServer() {
     audioZoneService.listen();
     soccerService.listenForSoccerEvents();
 
+    socket.on("ping", (timestamp, callback) => {
+      if (typeof callback === "function") callback(timestamp);
+    });
+
     socketTransports[socket.id] = [];
 
     // --- MEDIASOUP LISTENERS ---
