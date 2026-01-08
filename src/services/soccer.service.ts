@@ -93,6 +93,9 @@ export class SoccerService {
 
   // exponential drag v(t) = v0 * e^(-DRAG * t)
   private static readonly DRAG = 1;
+  private static readonly PLAYER_DRAG = 4; // Snappier movement control
+  private static readonly BASE_ACCEL = 1600;
+  private static readonly BASE_MAX_SPEED = 600;
   private static readonly BOUNCE = 0.7;
   private static readonly BALL_RADIUS = 30;
   /**
@@ -591,38 +594,58 @@ export class SoccerService {
     const players = Array.from(this.playerPhysics.values());
 
     /**
-     * Apply Inputs (Acceleration)
+     * 1. Velocity Update (Acceleration and Drag)
      */
     for (const player of players) {
       const input = this.playerInputs.get(player.id);
-      if (input && (player.team === "red" || player.team === "blue")) {
-        const speedStat = player.soccerStats?.speed ?? 0;
-        let speedMultiplier = 1.0 + speedStat * 0.1;
+      const isSpectator = player.team !== "red" && player.team !== "blue";
 
-        if (this.isPlayerSlowed(player.id)) {
-          speedMultiplier *= this.getSlowMultiplier();
-        }
+      // Calculate multipliers
+      const speedStat = player.soccerStats?.speed ?? 0;
+      let speedMultiplier = 1.0 + speedStat * 0.1;
+      if (this.isPlayerSlowed(player.id)) {
+        speedMultiplier *= this.getSlowMultiplier();
+      }
 
-        const ACCEL = 1600 * speedMultiplier;
-        const MAX_SPEED = 600 * speedMultiplier;
+      // Acceleration (Semi-implicit Euler: update velocity before position)
+      if (input && !isSpectator) {
+        const accel = this.BASE_ACCEL * speedMultiplier;
+        if (input.up) player.vy -= accel * deltaTime;
+        if (input.down) player.vy += accel * deltaTime;
+        if (input.left) player.vx -= accel * deltaTime;
+        if (input.right) player.vx += accel * deltaTime;
+      }
 
-        if (input.up) player.vy -= ACCEL * deltaTime;
-        if (input.down) player.vy += ACCEL * deltaTime;
-        if (input.left) player.vx -= ACCEL * deltaTime;
-        if (input.right) player.vx += ACCEL * deltaTime;
+      // Drag (Exponential, frame-rate independent)
+      const dribblingStat = player.soccerStats?.dribbling ?? 0;
+      // Dribbling reduces drag: 0 stat = 1.0x drag, 10 stat = 0.5x drag
+      const dragMultiplier = isSpectator
+        ? 1.0
+        : Math.max(0.5, 1.0 - dribblingStat * 0.05);
+      const dragFactor = Math.exp(
+        -this.PLAYER_DRAG * dragMultiplier * deltaTime,
+      );
+      player.vx *= dragFactor;
+      player.vy *= dragFactor;
 
-        // Clamp Velocity
-        const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-        if (speed > MAX_SPEED) {
-          const scale = MAX_SPEED / speed;
-          player.vx *= scale;
-          player.vy *= scale;
-        }
+      // Speed Clamping
+      const maxSpeed = this.BASE_MAX_SPEED * speedMultiplier;
+      const currentSpeed = Math.sqrt(
+        player.vx * player.vx + player.vy * player.vy,
+      );
+      if (currentSpeed > maxSpeed && !isSpectator) {
+        const scale = maxSpeed / currentSpeed;
+        player.vx *= scale;
+        player.vy *= scale;
+      }
+      if (currentSpeed < 5) {
+        player.vx = 0;
+        player.vy = 0;
       }
     }
 
     /**
-     * player collision
+     * 2. Resolve Collisions (Updates velocity and position)
      */
     for (let i = 0; i < players.length; i++) {
       for (let j = i + 1; j < players.length; j++) {
@@ -659,8 +682,7 @@ export class SoccerService {
     }
 
     /**
-     * Ball to player collision
-     * knockback stuff I clamped the distance so it wono't be weird to look at front end
+     * Ball to player collision knockback
      */
     for (const player of players) {
       const dx = this.ballState.x - player.x;
@@ -672,9 +694,23 @@ export class SoccerService {
         this.handleBallPlayerKnockback(player, dx, dy, distance);
       }
     }
+
+    /**
+     * 3. Position Update and World/Wall Collisions
+     */
     for (const player of players) {
       player.x += player.vx * deltaTime;
       player.y += player.vy * deltaTime;
+
+      // Map Boundary Clamping (Keep all players within world bounds)
+      player.x = Math.max(
+        player.radius,
+        Math.min(this.WORLD_BOUNDS.width - player.radius, player.x),
+      );
+      player.y = Math.max(
+        player.radius,
+        Math.min(this.WORLD_BOUNDS.height - player.radius, player.y),
+      );
 
       const isSpectator = player.team !== "red" && player.team !== "blue";
       if (isSpectator) {
@@ -713,20 +749,6 @@ export class SoccerService {
             player.vy = 0;
           }
         }
-      }
-    }
-
-    for (const player of players) {
-      const dribblingStat = player.soccerStats?.dribbling ?? 0;
-      const frictionCoefficient = 0.95 - dribblingStat * 0.02;
-
-      player.vx *= frictionCoefficient;
-      player.vy *= frictionCoefficient;
-
-      const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-      if (speed < 5) {
-        player.vx = 0;
-        player.vy = 0;
       }
     }
   }
@@ -823,7 +845,10 @@ export class SoccerService {
     }
 
     if (updates.length > 0) {
-      io.to("scene:SoccerMap").emit("players:physicsUpdate", updates);
+      io.to("scene:SoccerMap").emit("players:physicsUpdate", {
+        players: updates,
+        timestamp: Date.now(),
+      });
     }
   }
 
@@ -2105,7 +2130,10 @@ export class SoccerService {
     }
 
     if (updates.length > 0) {
-      this.ioInstance.to(socketId).emit("players:physicsUpdate", updates);
+      this.ioInstance.to(socketId).emit("players:physicsUpdate", {
+        players: updates,
+        timestamp: Date.now(),
+      });
       console.log(
         `Sent initial physics state (${updates.length} players) to ${socketId}`,
       );
