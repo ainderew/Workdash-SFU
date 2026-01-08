@@ -112,6 +112,7 @@ export class SoccerService {
   private static readonly KICK_KNOCKBACK = 400;
 
   private static updateInterval: NodeJS.Timeout | null = null;
+  private static lastTickTime = Date.now();
   private static activeConnections = 0;
   private static lastKickTime = 0;
   private static tickCount = 0; // Throttling counter
@@ -120,6 +121,10 @@ export class SoccerService {
   private static mapLoaded = false;
 
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
+  private static playerInputs: Map<
+    string,
+    { up: boolean; down: boolean; left: boolean; right: boolean }
+  > = new Map();
   private static ioInstance: Server | null = null;
 
   private static goalZones: GoalZone[] = [];
@@ -388,10 +393,15 @@ export class SoccerService {
   }
 
   private static startPhysicsLoop(io: Server) {
+    this.lastTickTime = Date.now();
     this.updateInterval = setInterval(() => {
-      // 1. Run Physics (60Hz) - Keeps simulation accurate
-      this.updateBallPhysics(io);
-      this.updateGameTimer(io);
+      const now = Date.now();
+      const dt = (now - this.lastTickTime) / 1000;
+      this.lastTickTime = now;
+
+      // 1. Run Physics with actual dt
+      this.updateBallPhysics(io, dt);
+      this.updateGameTimer(io, dt);
 
       // 2. Throttle Network Broadcasts (20Hz) - Sends every 3rd frame
       this.tickCount++;
@@ -402,9 +412,8 @@ export class SoccerService {
     }, this.UPDATE_INTERVAL_MS);
   }
 
-  private static updateBallPhysics(io: Server) {
+  private static updateBallPhysics(io: Server, dt: number) {
     const ball = this.ballState;
-    const dt = this.UPDATE_INTERVAL_MS / 1000;
     if (ball.isMoving) {
       const dragFactor = Math.exp(-this.DRAG * dt);
       ball.vx *= dragFactor;
@@ -583,6 +592,37 @@ export class SoccerService {
 
   private static updatePlayerPhysics(io: Server, deltaTime: number) {
     const players = Array.from(this.playerPhysics.values());
+
+    /**
+     * Apply Inputs (Acceleration)
+     */
+    for (const player of players) {
+      const input = this.playerInputs.get(player.id);
+      if (input && (player.team === "red" || player.team === "blue")) {
+        const speedStat = player.soccerStats?.speed ?? 0;
+        let speedMultiplier = 1.0 + speedStat * 0.1;
+
+        if (this.isPlayerSlowed(player.id)) {
+          speedMultiplier *= this.getSlowMultiplier();
+        }
+
+        const ACCEL = 1600 * speedMultiplier;
+        const MAX_SPEED = 600 * speedMultiplier;
+
+        if (input.up) player.vy -= ACCEL * deltaTime;
+        if (input.down) player.vy += ACCEL * deltaTime;
+        if (input.left) player.vx -= ACCEL * deltaTime;
+        if (input.right) player.vx += ACCEL * deltaTime;
+
+        // Clamp Velocity
+        const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+        if (speed > MAX_SPEED) {
+          const scale = MAX_SPEED / speed;
+          player.vx *= scale;
+          player.vy *= scale;
+        }
+      }
+    }
 
     /**
      * player collision
@@ -870,12 +910,8 @@ export class SoccerService {
     SoccerService.broadcastBallState(this.io);
   }
 
-  private static updateGameTimer(io: Server) {
+  private static updateGameTimer(io: Server, deltaTime: number) {
     if (!this.isGameActive) return;
-
-    const now = Date.now();
-    const deltaTime = (now - this.lastTimerUpdate) / 1000;
-    this.lastTimerUpdate = now;
 
     this.gameTimeRemaining -= deltaTime;
 
@@ -1980,8 +2016,16 @@ export class SoccerService {
     });
   }
 
+  public static updatePlayerInput(
+    playerId: string,
+    input: { up: boolean; down: boolean; left: boolean; right: boolean },
+  ) {
+    this.playerInputs.set(playerId, input);
+  }
+
   public static removePlayerPhysics(playerId: string) {
     this.playerPhysics.delete(playerId);
+    this.playerInputs.delete(playerId);
   }
 
   public static isPlayerSlowed(playerId: string): boolean {
