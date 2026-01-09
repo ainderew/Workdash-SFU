@@ -19,10 +19,7 @@ import { MmrSystem, MatchResult } from "./mmr.service.js";
 import { SoccerStatsRepository } from "../repositories/soccer-stats/soccer-stats.repository.js";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { SoccerPhysics } from "../config/soccerPhysics.js";
 
 interface CollisionRect {
   x: number;
@@ -40,6 +37,8 @@ interface PlayerPhysicsState {
   radius: number;
   team?: "red" | "blue" | "spectator" | null;
   soccerStats?: { speed: number; kickPower: number; dribbling: number } | null;
+  lastProcessedSequence: number;
+  currentInput: { up: boolean; down: boolean; left: boolean; right: boolean };
 }
 
 interface GoalZone {
@@ -791,6 +790,32 @@ export class SoccerService {
 
     // Combine ball knockback, movement, wall collision, and friction into a single pass
     for (const player of players) {
+      // 0. Apply Input Acceleration
+      if (player.currentInput) {
+        const speedStat = player.soccerStats?.speed ?? 0;
+        let speedMultiplier = 1.0 + speedStat * 0.1;
+
+        if (this.isPlayerSlowed(player.id)) {
+          speedMultiplier *= this.getSlowMultiplier();
+        }
+
+        const ACCEL = SoccerPhysics.BASE_ACCEL * speedMultiplier;
+        const MAX_SPEED = SoccerPhysics.MAX_SPEED * speedMultiplier;
+
+        if (player.currentInput.up) player.vy -= ACCEL * dt;
+        if (player.currentInput.down) player.vy += ACCEL * dt;
+        if (player.currentInput.left) player.vx -= ACCEL * dt;
+        if (player.currentInput.right) player.vx += ACCEL * dt;
+
+        // Clamp speed
+        const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+        if (speed > MAX_SPEED) {
+          const scale = MAX_SPEED / speed;
+          player.vx *= scale;
+          player.vy *= scale;
+        }
+      }
+
       // 1. Ball Knockback
       const dx = this.ballState.x - player.x;
       const dy = this.ballState.y - player.y;
@@ -813,8 +838,15 @@ export class SoccerService {
 
       // 4. Friction
       const dribblingStat = player.soccerStats?.dribbling ?? 0;
-      const frictionCoefficient = 0.95 - dribblingStat * 0.02;
-
+      // Dribbling slightly reduces friction? Or increases control?
+      // Keeping original friction logic but using constant base
+      const frictionCoefficient = 0.95 - dribblingStat * 0.02; // Original logic preserved?
+      // Actually, standard friction is usually frame-independent: pow(friction, dt)
+      // But preserving existing linear-ish friction for now to minimize regression risks
+      // unless user wants physics overhaul there too.
+      // Let's use Frame Independent Friction
+      // coeff = Math.pow(BASE_FRICTION, dt * 60)
+      
       player.vx *= frictionCoefficient;
       player.vy *= frictionCoefficient;
 
@@ -932,6 +964,7 @@ export class SoccerService {
       y: number;
       vx: number;
       vy: number;
+      lastProcessedSequence: number;
       isGhosted: boolean;
       isSpectator: boolean;
     }> = [];
@@ -945,6 +978,7 @@ export class SoccerService {
         y: player.y,
         vx: player.vx,
         vy: player.vy,
+        lastProcessedSequence: player.lastProcessedSequence,
         isGhosted:
           this.ninjaStepPlayers.has(player.id) && !this.isTouchingBall(player),
         isSpectator: player.team !== "red" && player.team !== "blue",
@@ -2083,6 +2117,8 @@ export class SoccerService {
     this.playerPhysics.set(playerId, {
       id: playerId,
       team: playerState?.team || null,
+      lastProcessedSequence: 0,
+      currentInput: { up: false, down: false, left: false, right: false },
       ...state,
     });
     this.rebuildPhysicsCache();

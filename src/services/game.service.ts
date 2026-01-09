@@ -48,7 +48,6 @@ export class GameService {
       },
     );
 
-    /*
     // NEW: Listen for raw inputs (WASD) for Physics maps
     this.socket.on(
       "playerInput",
@@ -57,11 +56,11 @@ export class GameService {
         down: boolean;
         left: boolean;
         right: boolean;
+        sequence: number; // Add sequence number
       }) => {
         this.handlePlayerInput(input);
       },
     );
-    */
 
     // Legacy: Keep this for non-physics maps (like MainMap)
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
@@ -106,44 +105,12 @@ export class GameService {
     down: boolean;
     left: boolean;
     right: boolean;
+    sequence: number;
   }) {
     const playerState = playerPositions.get(this.socket.id);
     if (!playerState || playerState.currentScene !== "SoccerMap") return;
 
-    // 1. Get Physics State (This is where VX/VY live)
-    // Note: You must make `playerPhysics` public static in SoccerService
-    // or add a getter method like `SoccerService.getPlayerPhysics(id)`
-    const physics = SoccerService["playerPhysics"].get(this.socket.id);
-
-    if (physics) {
-      // Apply speed stat multiplier (1 point = 0.1x boost, range 1.0x-2.5x)
-      const speedStat = physics.soccerStats?.speed ?? 0;
-      let speedMultiplier = 1.0 + speedStat * 0.1;
-
-      // Apply slow skill multiplier if player is slowed
-      if (SoccerService.isPlayerSlowed(this.socket.id)) {
-        speedMultiplier *= SoccerService.getSlowMultiplier();
-      }
-
-      const ACCEL = 1600 * speedMultiplier; // Acceleration Force with stat multiplier
-      const MAX_SPEED = 600 * speedMultiplier; // Speed Limit with stat multiplier
-
-      // 2. Apply Force (Add to velocity)
-      if (input.up) physics.vy -= ACCEL;
-      if (input.down) physics.vy += ACCEL;
-      if (input.left) physics.vx -= ACCEL;
-      if (input.right) physics.vx += ACCEL;
-
-      // 3. Clamp Velocity (Don't go faster than MAX_SPEED)
-      const speed = Math.sqrt(
-        physics.vx * physics.vx + physics.vy * physics.vy,
-      );
-      if (speed > MAX_SPEED) {
-        const scale = MAX_SPEED / speed;
-        physics.vx *= scale;
-        physics.vy *= scale;
-      }
-    }
+    SoccerService.handlePlayerInput(this.socket.id, input);
   }
 
   // ==========================================
@@ -258,13 +225,7 @@ export class GameService {
     if (!playerState) return;
 
     if (playerState.currentScene === "SoccerMap") {
-      SoccerService.updatePlayerPhysicsState(this.socket.id, {
-        x: data.x,
-        y: data.y,
-        vx: data.vx,
-        vy: data.vy,
-        radius: 30,
-      });
+      return;
     }
 
     // Normal logic for non-physics maps (and persistence for SoccerMap)
