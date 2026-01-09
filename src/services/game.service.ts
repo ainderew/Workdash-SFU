@@ -48,6 +48,7 @@ export class GameService {
       },
     );
 
+    /*
     // NEW: Listen for raw inputs (WASD) for Physics maps
     this.socket.on(
       "playerInput",
@@ -60,6 +61,7 @@ export class GameService {
         this.handlePlayerInput(input);
       },
     );
+    */
 
     // Legacy: Keep this for non-physics maps (like MainMap)
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
@@ -256,10 +258,16 @@ export class GameService {
     if (!playerState) return;
 
     if (playerState.currentScene === "SoccerMap") {
-      return;
+      SoccerService.updatePlayerPhysicsState(this.socket.id, {
+        x: data.x,
+        y: data.y,
+        vx: data.vx,
+        vy: data.vy,
+        radius: 30,
+      });
     }
 
-    // Normal logic for non-physics maps
+    // Normal logic for non-physics maps (and persistence for SoccerMap)
     playerState.x = data.x;
     playerState.y = data.y;
     playerState.vx = data.vx;
