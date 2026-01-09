@@ -75,6 +75,7 @@ export type PlayerMovementData = {
   vy: number;
   isAttacking: boolean;
   isKartMode: boolean;
+  timestamp: Date;
   currentScene?: string; // Optional scene identifier for tracking
 };
 
