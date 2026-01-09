@@ -124,6 +124,7 @@ export class SoccerService {
   private static mapLoaded = false;
 
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
+  private static playerPhysicsArray: PlayerPhysicsState[] = [];
   private static ioInstance: Server | null = null;
 
   private static goalZones: GoalZone[] = [];
@@ -423,6 +424,8 @@ export class SoccerService {
     this.lastPhysicsUpdate = Date.now();
     this.lastNetworkBroadcast = Date.now();
 
+    let nextTick = Date.now();
+
     while (this.physicsLoopRunning) {
       const frameStart = Date.now();
 
@@ -434,7 +437,9 @@ export class SoccerService {
       const broadcastDelta = now - this.lastNetworkBroadcast;
       if (broadcastDelta >= this.NETWORK_RATE_MS) {
         if (broadcastDelta > 75) {
-             console.warn(`[Network Lag] Broadcast interval: ${broadcastDelta}ms (Target: 50ms)`);
+          console.warn(
+            `[Network Lag] Broadcast interval: ${broadcastDelta}ms (Target: 50ms)`,
+          );
         }
         this.lastNetworkBroadcast = now;
         this.broadcastBallState(io);
@@ -443,11 +448,19 @@ export class SoccerService {
 
       const executionTime = Date.now() - frameStart;
       if (executionTime > 20) {
-          console.warn(`[Slow Frame] Physics took ${executionTime}ms`);
+        console.warn(`[Slow Frame] Physics took ${executionTime}ms`);
       }
-      const waitTime = Math.max(0, this.PHYSICS_RATE_MS - executionTime);
 
-      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      nextTick += this.PHYSICS_RATE_MS;
+      let waitTime = nextTick - Date.now();
+
+      if (waitTime < -100) {
+        // We are too far behind, reset the clock to avoid burst processing
+        nextTick = Date.now();
+        waitTime = 0;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, waitTime)));
     }
   }
 
@@ -495,7 +508,7 @@ export class SoccerService {
 
   private static handleBallPlayerCollisions(io: Server) {
     const ball = this.ballState;
-    const playersInScene = Array.from(this.playerPhysics.values());
+    const playersInScene = this.playerPhysicsArray;
     const collidedPlayers: PlayerPhysicsState[] = [];
 
     for (const player of playersInScene) {
@@ -745,7 +758,7 @@ export class SoccerService {
   }
 
   private static updatePlayerPhysics(io: Server, dt: number) {
-    const players = Array.from(this.playerPhysics.values());
+    const players = this.playerPhysicsArray;
 
     for (let i = 0; i < players.length; i++) {
       for (let j = i + 1; j < players.length; j++) {
@@ -776,7 +789,9 @@ export class SoccerService {
       }
     }
 
+    // Combine ball knockback, movement, wall collision, and friction into a single pass
     for (const player of players) {
+      // 1. Ball Knockback
       const dx = this.ballState.x - player.x;
       const dy = this.ballState.y - player.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
@@ -785,19 +800,18 @@ export class SoccerService {
       if (distance < minDistance && this.ballState.isMoving) {
         this.handleBallPlayerKnockback(player, dx, dy, distance);
       }
-    }
 
-    for (const player of players) {
+      // 2. Movement
       player.x += player.vx * dt;
       player.y += player.vy * dt;
 
+      // 3. Spectator Wall Collision
       const isSpectator = player.team !== "red" && player.team !== "blue";
       if (isSpectator) {
         this.handleSpectatorWallCollisions(player);
       }
-    }
 
-    for (const player of players) {
+      // 4. Friction
       const dribblingStat = player.soccerStats?.dribbling ?? 0;
       const frictionCoefficient = 0.95 - dribblingStat * 0.02;
 
@@ -920,27 +934,28 @@ export class SoccerService {
       vy: number;
       isGhosted: boolean;
       isSpectator: boolean;
-      timestamp: number;
     }> = [];
 
     const timestamp = Date.now();
 
-    for (const [id, player] of this.playerPhysics.entries()) {
+    for (const player of this.playerPhysicsArray) {
       updates.push({
-        id,
+        id: player.id,
         x: player.x,
         y: player.y,
         vx: player.vx,
         vy: player.vy,
         isGhosted:
-          this.ninjaStepPlayers.has(id) && !this.isTouchingBall(player),
+          this.ninjaStepPlayers.has(player.id) && !this.isTouchingBall(player),
         isSpectator: player.team !== "red" && player.team !== "blue",
-        timestamp,
       });
     }
 
     if (updates.length > 0) {
-      io.to("scene:SoccerMap").emit("players:physicsUpdate", updates);
+      io.to("scene:SoccerMap").emit("players:physicsUpdate", {
+        timestamp,
+        updates,
+      });
     }
   }
 
@@ -2070,10 +2085,16 @@ export class SoccerService {
       team: playerState?.team || null,
       ...state,
     });
+    this.rebuildPhysicsCache();
   }
 
   public static removePlayerPhysics(playerId: string) {
     this.playerPhysics.delete(playerId);
+    this.rebuildPhysicsCache();
+  }
+
+  private static rebuildPhysicsCache() {
+    this.playerPhysicsArray = Array.from(this.playerPhysics.values());
   }
 
   public static isPlayerSlowed(playerId: string): boolean {
