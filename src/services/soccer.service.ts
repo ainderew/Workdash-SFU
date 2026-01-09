@@ -271,6 +271,23 @@ export class SoccerService {
     });
   }
 
+  public static handlePlayerInput(
+    playerId: string,
+    input: {
+      up: boolean;
+      down: boolean;
+      left: boolean;
+      right: boolean;
+      sequence: number;
+    },
+  ) {
+    const physics = this.playerPhysics.get(playerId);
+    if (physics) {
+      physics.currentInput = input;
+      physics.lastProcessedSequence = input.sequence;
+    }
+  }
+
   private queueBallKick(data: BallKickData) {
     const now = Date.now();
     if (now - SoccerService.lastKickTime < SoccerService.KICK_COOLDOWN_MS) {
