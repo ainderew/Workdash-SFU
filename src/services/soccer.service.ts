@@ -431,13 +431,20 @@ export class SoccerService {
       this.updateGameTimer(io);
 
       const now = Date.now();
-      if (now - this.lastNetworkBroadcast >= this.NETWORK_RATE_MS) {
+      const broadcastDelta = now - this.lastNetworkBroadcast;
+      if (broadcastDelta >= this.NETWORK_RATE_MS) {
+        if (broadcastDelta > 75) {
+             console.warn(`[Network Lag] Broadcast interval: ${broadcastDelta}ms (Target: 50ms)`);
+        }
         this.lastNetworkBroadcast = now;
         this.broadcastBallState(io);
         this.broadcastPlayerStates(io);
       }
 
       const executionTime = Date.now() - frameStart;
+      if (executionTime > 20) {
+          console.warn(`[Slow Frame] Physics took ${executionTime}ms`);
+      }
       const waitTime = Math.max(0, this.PHYSICS_RATE_MS - executionTime);
 
       await new Promise((resolve) => setTimeout(resolve, waitTime));
