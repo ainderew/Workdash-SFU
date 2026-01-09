@@ -101,7 +101,7 @@ export class SoccerService {
   private static readonly BOUNCE = 0.7;
   private static readonly BALL_RADIUS = 30;
   private static readonly PHYSICS_RATE_MS = 16.6;
-  private static readonly NETWORK_RATE_MS = 50;
+  private static readonly NETWORK_RATE_MS = 48;
   private static readonly VELOCITY_THRESHOLD = 10;
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 300;
@@ -436,7 +436,6 @@ export class SoccerService {
       const now = Date.now();
       const broadcastDelta = now - this.lastNetworkBroadcast;
       if (broadcastDelta >= this.NETWORK_RATE_MS) {
-        console.log('[Physics] Broadcasting update. Delta:', broadcastDelta);
         if (broadcastDelta > 75) {
           console.warn(
             `[Network Lag] Broadcast interval: ${broadcastDelta}ms (Target: 50ms)`,
@@ -448,7 +447,6 @@ export class SoccerService {
       }
 
       const executionTime = Date.now() - frameStart;
-      console.log('[Physics] Frame execution time:', executionTime);
       if (executionTime > 20) {
         console.warn(`[Slow Frame] Physics took ${executionTime}ms`);
       }
