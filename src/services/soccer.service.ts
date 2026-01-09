@@ -101,7 +101,7 @@ export class SoccerService {
   private static readonly BOUNCE = 0.7;
   private static readonly BALL_RADIUS = 30;
   private static readonly PHYSICS_RATE_MS = 16.6;
-  private static readonly NETWORK_RATE_MS = 48;
+  private static readonly NETWORK_RATE_MS = 16;
   private static readonly VELOCITY_THRESHOLD = 10;
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 300;
