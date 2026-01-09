@@ -30,16 +30,18 @@ interface CollisionRect {
   width: number;
   height: number;
 }
+
 interface PlayerPhysicsState {
   id: string;
   x: number;
   y: number;
   vx: number;
   vy: number;
-  radius: number; // Collision radius
+  radius: number;
   team?: "red" | "blue" | "spectator" | null;
   soccerStats?: { speed: number; kickPower: number; dribbling: number } | null;
 }
+
 interface GoalZone {
   name: string;
   team: "red" | "blue";
@@ -47,6 +49,13 @@ interface GoalZone {
   y: number;
   width: number;
   height: number;
+}
+
+interface PendingKick {
+  playerId: string;
+  angle: number;
+  kickPower: number;
+  timestamp: number;
 }
 
 enum GameStatus {
@@ -77,9 +86,6 @@ export class SoccerService {
 
   private static playerMatchStats: Map<string, PlayerMatchStats> = new Map();
 
-  /**
-   * Singleton on purpose do not change please
-   */
   private static ballState: BallState & { previousTouchId: string | null } = {
     x: 1760,
     y: 800,
@@ -91,32 +97,28 @@ export class SoccerService {
     isMoving: false,
   };
 
-  // exponential drag v(t) = v0 * e^(-DRAG * t)
   private static readonly DRAG = 1;
   private static readonly BOUNCE = 0.7;
   private static readonly BALL_RADIUS = 30;
-  /**
- *TODO: figure out centralized tickrate management
- for base game do 20HZ for soccer 60hz 
- */
-  private static readonly UPDATE_INTERVAL_MS = 16.6; // 60Hz update rate
+  private static readonly PHYSICS_RATE_MS = 16.6;
+  private static readonly NETWORK_RATE_MS = 50;
   private static readonly VELOCITY_THRESHOLD = 10;
   private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
   private static readonly KICK_COOLDOWN_MS = 300;
   private static readonly MAX_DRIBBLE_DISTANCE = 300;
+  private static readonly MAX_DELTA_TIME = 0.1;
 
   private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
-  // private static readonly FIELD_LEFT = 550;
-  // private static readonly FIELD_RIGHT = 3000;
-  // private static readonly PLAYER_MASS = 1.5;
   private static readonly PLAYER_RADIUS = 30;
   private static readonly PUSH_DAMPING = 1.5;
   private static readonly BALL_KNOCKBACK = 0.6;
   private static readonly KICK_KNOCKBACK = 400;
 
-  private static updateInterval: NodeJS.Timeout | null = null;
+  private static physicsLoopRunning = false;
   private static activeConnections = 0;
   private static lastKickTime = 0;
+  private static lastPhysicsUpdate = Date.now();
+  private static lastNetworkBroadcast = 0;
 
   private static collisionRects: CollisionRect[] = [];
   private static mapLoaded = false;
@@ -127,7 +129,8 @@ export class SoccerService {
   private static goalZones: GoalZone[] = [];
   private static goalsLoaded = false;
   private static score = { red: 0, blue: 0 };
-  private static hasScoredGoal = false;
+  private static goalScoredAt: number = 0;
+  private static readonly GOAL_RESET_DELAY_MS = 3000;
 
   private static readonly DEFAULT_GAME_TIME = 5 * 60;
   private static readonly OVERTIME_DURATION = 1 * 60;
@@ -135,8 +138,6 @@ export class SoccerService {
   private static isGameActive = false;
   private static lastTimerUpdate = Date.now();
 
-  // Skill system
-  // Cooldown tracking: playerId -> (skillId -> timestamp)
   private static playerSkillCooldowns: Map<string, Map<string, number>> =
     new Map();
   private static slowedPlayers: Set<string> = new Set();
@@ -157,6 +158,12 @@ export class SoccerService {
       speed?: { value: number; expiresAt: number };
     }
   > = new Map();
+
+  private static pendingKicks: PendingKick[] = [];
+  private static pendingDribbles: BallDribbleData[] = [];
+  private static inputLock = false;
+
+  private static skillTimeouts: Map<string, NodeJS.Timeout> = new Map();
 
   private static readonly RED_TEAM_SPAWNS = [
     { x: 1413, y: 515 },
@@ -193,18 +200,18 @@ export class SoccerService {
       SoccerService.loadGoalZones();
     }
 
-    if (!SoccerService.updateInterval) {
+    if (!SoccerService.physicsLoopRunning) {
       SoccerService.startPhysicsLoop(io);
     }
   }
 
   listenForSoccerEvents() {
     this.socket.on(GameEventEnums.BALL_KICK, (data: BallKickData) => {
-      this.handleBallKick(data);
+      this.queueBallKick(data);
     });
 
     this.socket.on(GameEventEnums.BALL_DRIBBLE, (data: BallDribbleData) => {
-      this.handleBallDribble(data);
+      this.queueBallDribble(data);
     });
 
     this.socket.on(
@@ -264,94 +271,9 @@ export class SoccerService {
     });
   }
 
-  private handleBallKick(data: BallKickData) {
+  private queueBallKick(data: BallKickData) {
     const now = Date.now();
-
     if (now - SoccerService.lastKickTime < SoccerService.KICK_COOLDOWN_MS) {
-      return;
-    }
-
-    const ballState = SoccerService.ballState;
-    const kickerPhysics = SoccerService.playerPhysics.get(data.playerId);
-    const playerPositions = getPlayerPositions();
-    const playerState = playerPositions.get(data.playerId);
-
-    if (!kickerPhysics || !playerState) return;
-
-    if (playerState.team !== "red" && playerState.team !== "blue") {
-      return;
-    }
-
-    // Check kick range
-    const dx_dist = ballState.x - kickerPhysics.x;
-    const dy_dist = ballState.y - kickerPhysics.y;
-    const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
-
-    const isMetaVisionActive = SoccerService.metavisionPlayers.has(
-      data.playerId,
-    );
-    const kickThreshold = isMetaVisionActive ? 200 : 140;
-
-    if (distance > kickThreshold) {
-      console.log(
-        `Kick rejected for ${data.playerId}: distance ${distance.toFixed(0)} > ${kickThreshold}`,
-      );
-      return;
-    }
-
-    SoccerService.lastKickTime = now;
-
-    let kickPowerStat = kickerPhysics?.soccerStats?.kickPower ?? 0;
-
-    const buffs = SoccerService.playerBuffs.get(data.playerId);
-    if (buffs?.kickPower && Date.now() < buffs.kickPower.expiresAt) {
-      kickPowerStat += buffs.kickPower.value;
-      console.log(`Kick power buffed: ${kickPowerStat} (base + buff)`);
-    }
-
-    let kickPowerMultiplier = 1.0 + kickPowerStat * 0.1;
-
-    if (isMetaVisionActive) {
-      kickPowerMultiplier *= 1.2;
-    }
-
-    const kickVx = Math.cos(data.angle) * data.kickPower * kickPowerMultiplier;
-    const kickVy = Math.sin(data.angle) * data.kickPower * kickPowerMultiplier;
-
-    ballState.vx = kickVx;
-    ballState.vy = kickVy;
-    if (ballState.lastTouchId !== data.playerId) {
-      ballState.previousTouchId = ballState.lastTouchId;
-      ballState.lastTouchId = data.playerId;
-    }
-    ballState.lastTouchTimestamp = now;
-    ballState.isMoving = true;
-
-    const knockbackVx = -Math.cos(data.angle) * SoccerService.KICK_KNOCKBACK;
-    const knockbackVy = -Math.sin(data.angle) * SoccerService.KICK_KNOCKBACK;
-    kickerPhysics.vx += knockbackVx;
-    kickerPhysics.vy += knockbackVy;
-
-    console.log(
-      `Ball kicked by ${data.playerId}${isMetaVisionActive ? " (METAVISION)" : ""}: power=${data.kickPower}, angle=${data.angle.toFixed(2)}, mult=${kickPowerMultiplier.toFixed(2)}`,
-    );
-
-    this.io.to("scene:SoccerMap").emit(GameEventEnums.BALL_KICKED, {
-      kickerId: data.playerId,
-      kickPower: data.kickPower,
-      ballX: ballState.x,
-      ballY: ballState.y,
-    });
-
-    this.broadcastBallState();
-  }
-
-  private handleBallDribble(data: BallDribbleData) {
-    // Prevent dribble from overriding recent kicks (100ms cooldown)
-    const now = Date.now();
-    const timeSinceLastKick = now - SoccerService.lastKickTime;
-    if (timeSinceLastKick < 100) {
-      // Kick takes priority - ignore dribble events for 100ms after a kick
       return;
     }
 
@@ -364,14 +286,122 @@ export class SoccerService {
       return;
     }
 
-    const ballState = SoccerService.ballState;
+    SoccerService.pendingKicks.push({
+      playerId: data.playerId,
+      angle: data.angle,
+      kickPower: data.kickPower,
+      timestamp: now,
+    });
+  }
 
-    // Calculate distance from player to ball
+  private queueBallDribble(data: BallDribbleData) {
+    const playerPositions = getPlayerPositions();
+    const playerState = playerPositions.get(data.playerId);
+    if (
+      !playerState ||
+      (playerState.team !== "red" && playerState.team !== "blue")
+    ) {
+      return;
+    }
+
+    SoccerService.pendingDribbles.push(data);
+  }
+
+  private static processInputQueue() {
+    if (this.inputLock) return;
+    this.inputLock = true;
+
+    const now = Date.now();
+
+    if (this.pendingKicks.length > 0) {
+      this.pendingKicks.sort((a, b) => a.timestamp - b.timestamp);
+      const kick = this.pendingKicks[0];
+      if (kick) {
+        this.executeKick(kick);
+        this.lastKickTime = now;
+      }
+      this.pendingKicks = [];
+      this.pendingDribbles = [];
+    } else if (this.pendingDribbles.length > 0) {
+      const timeSinceLastKick = now - this.lastKickTime;
+      if (timeSinceLastKick >= 100) {
+        const dribble = this.pendingDribbles[this.pendingDribbles.length - 1];
+        if (dribble) {
+          this.executeDribble(dribble);
+        }
+      }
+      this.pendingDribbles = [];
+    }
+
+    this.inputLock = false;
+  }
+
+  private static executeKick(kick: PendingKick) {
+    const ballState = this.ballState;
+    const kickerPhysics = this.playerPhysics.get(kick.playerId);
+
+    if (!kickerPhysics) return;
+
+    const dx_dist = ballState.x - kickerPhysics.x;
+    const dy_dist = ballState.y - kickerPhysics.y;
+    const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
+
+    const isMetaVisionActive = this.metavisionPlayers.has(kick.playerId);
+    const kickThreshold = isMetaVisionActive ? 200 : 140;
+
+    if (distance > kickThreshold) {
+      return;
+    }
+
+    let kickPowerStat = kickerPhysics?.soccerStats?.kickPower ?? 0;
+
+    const buffs = this.playerBuffs.get(kick.playerId);
+    if (buffs?.kickPower && Date.now() < buffs.kickPower.expiresAt) {
+      kickPowerStat += buffs.kickPower.value;
+    }
+
+    let kickPowerMultiplier = 1.0 + kickPowerStat * 0.1;
+
+    if (isMetaVisionActive) {
+      kickPowerMultiplier *= 1.2;
+    }
+
+    const kickVx = Math.cos(kick.angle) * kick.kickPower * kickPowerMultiplier;
+    const kickVy = Math.sin(kick.angle) * kick.kickPower * kickPowerMultiplier;
+
+    ballState.vx = kickVx;
+    ballState.vy = kickVy;
+    if (ballState.lastTouchId !== kick.playerId) {
+      ballState.previousTouchId = ballState.lastTouchId;
+      ballState.lastTouchId = kick.playerId;
+    }
+    ballState.lastTouchTimestamp = Date.now();
+    ballState.isMoving = true;
+
+    const knockbackVx = -Math.cos(kick.angle) * this.KICK_KNOCKBACK;
+    const knockbackVy = -Math.sin(kick.angle) * this.KICK_KNOCKBACK;
+    kickerPhysics.vx += knockbackVx;
+    kickerPhysics.vy += knockbackVy;
+
+    if (this.ioInstance) {
+      this.ioInstance.to("scene:SoccerMap").emit(GameEventEnums.BALL_KICKED, {
+        kickerId: kick.playerId,
+        kickPower: kick.kickPower,
+        ballX: ballState.x,
+        ballY: ballState.y,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
+  private static executeDribble(data: BallDribbleData) {
+    const ballState = this.ballState;
+
     const dx = ballState.x - data.playerX;
     const dy = ballState.y - data.playerY;
     const distance = Math.sqrt(dx * dx + dy * dy);
 
-    if (distance > SoccerService.MAX_DRIBBLE_DISTANCE) {
+    if (distance > this.MAX_DRIBBLE_DISTANCE) {
       return;
     }
 
@@ -386,186 +416,314 @@ export class SoccerService {
     }
     ballState.lastTouchTimestamp = Date.now();
     ballState.isMoving = true;
-
-    console.log(`Ball dribbled by ${data.playerId}`);
-    this.broadcastBallState();
   }
 
-  private static startPhysicsLoop(io: Server) {
-    this.updateInterval = setInterval(() => {
-      this.updateBallPhysics(io);
+  private static async startPhysicsLoop(io: Server) {
+    this.physicsLoopRunning = true;
+    this.lastPhysicsUpdate = Date.now();
+    this.lastNetworkBroadcast = Date.now();
+
+    while (this.physicsLoopRunning) {
+      const frameStart = Date.now();
+
+      this.processInputQueue();
+      this.updatePhysics(io);
       this.updateGameTimer(io);
-    }, this.UPDATE_INTERVAL_MS);
+
+      const now = Date.now();
+      if (now - this.lastNetworkBroadcast >= this.NETWORK_RATE_MS) {
+        this.lastNetworkBroadcast = now;
+        this.broadcastBallState(io);
+        this.broadcastPlayerStates(io);
+      }
+
+      const executionTime = Date.now() - frameStart;
+      const waitTime = Math.max(0, this.PHYSICS_RATE_MS - executionTime);
+
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+    }
   }
 
-  private static updateBallPhysics(io: Server) {
+  private static updatePhysics(io: Server) {
+    const now = Date.now();
+    const rawDt = (now - this.lastPhysicsUpdate) / 1000;
+    const dt = Math.min(rawDt, this.MAX_DELTA_TIME);
+    this.lastPhysicsUpdate = now;
+
+    this.updateBallPhysics(io, dt);
+    this.updatePlayerPhysics(io, dt);
+  }
+
+  private static updateBallPhysics(io: Server, dt: number) {
     const ball = this.ballState;
-    const dt = this.UPDATE_INTERVAL_MS / 1000;
-    if (ball.isMoving) {
-      const dragFactor = Math.exp(-this.DRAG * dt);
-      ball.vx *= dragFactor;
-      ball.vy *= dragFactor;
 
-      ball.x += ball.vx * dt;
-      ball.y += ball.vy * dt;
-
-      const playersInScene = Array.from(this.playerPhysics.values());
-      for (const player of playersInScene) {
-        const dx = ball.x - player.x;
-        const dy = ball.y - player.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        const playerRadius = this.PLAYER_RADIUS;
-        const ballRadius = this.BALL_RADIUS;
-        const minDistance = ballRadius + playerRadius;
-
-        if (distance < minDistance && ball.isMoving) {
-          const playerState = getPlayerPositions().get(player.id);
-          if (playerState) {
-            this.handleBallPlayerCollision(
-              io,
-              player.id,
-              playerState,
-              dx,
-              dy,
-              distance,
-              playerRadius,
-            );
-          }
-          break;
-        }
+    if (this.goalScoredAt > 0) {
+      if (Date.now() - this.goalScoredAt >= this.GOAL_RESET_DELAY_MS) {
+        this.finalizeGoalReset();
       }
-      for (const rect of this.collisionRects) {
-        const collision = this.checkBallRectCollision(ball, rect);
+      return;
+    }
 
-        if (collision) {
-          const normal = collision.normal;
-          const dotProduct = ball.vx * normal.x + ball.vy * normal.y;
+    if (!ball.isMoving) return;
 
-          ball.vx = ball.vx - 2 * dotProduct * normal.x;
-          ball.vy = ball.vy - 2 * dotProduct * normal.y;
-          ball.vx *= this.BOUNCE;
-          ball.vy *= this.BOUNCE;
+    const dragFactor = Math.exp(-this.DRAG * dt);
+    ball.vx *= dragFactor;
+    ball.vy *= dragFactor;
 
-          const penetration =
-            this.BALL_RADIUS -
-            Math.sqrt(
-              Math.pow(
-                ball.x -
-                  Math.max(rect.x, Math.min(ball.x, rect.x + rect.width)),
-                2,
-              ) +
-                Math.pow(
-                  ball.y -
-                    Math.max(rect.y, Math.min(ball.y, rect.y + rect.height)),
-                  2,
-                ),
-            );
-          ball.x += normal.x * (penetration + 1);
-          ball.y += normal.y * (penetration + 1);
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
 
-          console.log(
-            `Ball bounced off wall at (${ball.x.toFixed(0)}, ${ball.y.toFixed(0)})`,
-          );
-          break; // Only one wall collision per frame
-        }
-      }
+    this.handleBallPlayerCollisions(io);
+    this.handleBallWallCollisions();
+    this.handleBallGoalCollisions(io);
+    this.handleBallBoundaryCollisions();
 
-      // Check goal collisions before boundary collision
-      for (const goal of this.goalZones) {
-        if (this.checkBallGoalCollision(ball, goal) && !this.hasScoredGoal) {
-          const scoringTeam = goal.team === "red" ? "blue" : "red";
-          this.score[scoringTeam]++;
+    const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+    if (speed < this.VELOCITY_THRESHOLD) {
+      ball.vx = 0;
+      ball.vy = 0;
+      ball.isMoving = false;
+    }
+  }
 
-          // Record Goal
-          if (ball.lastTouchId) {
-            const stats = this.playerMatchStats.get(ball.lastTouchId) || {
-              goals: 0,
-              assists: 0,
-              interceptions: 0,
-            };
-            stats.goals++;
-            this.playerMatchStats.set(ball.lastTouchId, stats);
-            console.log(
-              `Goal recorded for ${ball.lastTouchId}! Total: ${stats.goals}`,
-            );
+  private static handleBallPlayerCollisions(io: Server) {
+    const ball = this.ballState;
+    const playersInScene = Array.from(this.playerPhysics.values());
+    const collidedPlayers: PlayerPhysicsState[] = [];
 
-            // Record Assist
-            if (ball.previousTouchId) {
-              const scorerState = getPlayerPositions().get(ball.lastTouchId);
-              const assisterState = getPlayerPositions().get(
-                ball.previousTouchId,
-              );
-              if (
-                scorerState &&
-                assisterState &&
-                scorerState.team === assisterState.team
-              ) {
-                const assistStats = this.playerMatchStats.get(
-                  ball.previousTouchId,
-                ) || { goals: 0, assists: 0, interceptions: 0 };
-                assistStats.assists++;
-                this.playerMatchStats.set(ball.previousTouchId, assistStats);
-                console.log(
-                  `Assist recorded for ${ball.previousTouchId}! Total: ${assistStats.assists}`,
-                );
-              }
-            }
-          }
+    for (const player of playersInScene) {
+      const dx = ball.x - player.x;
+      const dy = ball.y - player.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const minDistance = this.BALL_RADIUS + player.radius;
 
-          console.log(
-            `GOAL! ${scoringTeam.toUpperCase()} team scored! Score: Red ${this.score.red} - Blue ${this.score.blue}`,
-          );
-
-          io.to("scene:SoccerMap").emit("goal:scored", {
-            scoringTeam,
-            goalName: goal.name,
-            lastTouchId: ball.lastTouchId,
-            score: {
-              red: this.score.red,
-              blue: this.score.blue,
-            },
-          });
-
-          this.resetBall();
-          this.resetAllPlayerPositions();
-          this.broadcastBallState(io);
-
-          return;
-        }
-      }
-
-      // Boundary collision with bounce
-      if (ball.x - this.BALL_RADIUS < 0) {
-        ball.x = this.BALL_RADIUS;
-        ball.vx = -ball.vx * this.BOUNCE;
-      } else if (ball.x + this.BALL_RADIUS > this.WORLD_BOUNDS.width) {
-        ball.x = this.WORLD_BOUNDS.width - this.BALL_RADIUS;
-        ball.vx = -ball.vx * this.BOUNCE;
-      }
-
-      if (ball.y - this.BALL_RADIUS < 0) {
-        ball.y = this.BALL_RADIUS;
-        ball.vy = -ball.vy * this.BOUNCE;
-      } else if (ball.y + this.BALL_RADIUS > this.WORLD_BOUNDS.height) {
-        ball.y = this.WORLD_BOUNDS.height - this.BALL_RADIUS;
-        ball.vy = -ball.vy * this.BOUNCE;
-      }
-
-      // Stop if velocity too low
-      const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
-      if (speed < this.VELOCITY_THRESHOLD) {
-        ball.vx = 0;
-        ball.vy = 0;
-        ball.isMoving = false;
-        console.log("Ball stopped moving");
+      if (distance < minDistance) {
+        collidedPlayers.push(player);
       }
     }
 
-    // Update player physics always runs, even when ball is stationary
-    this.updatePlayerPhysics(io, dt);
+    for (const player of collidedPlayers) {
+      const playerState = getPlayerPositions().get(player.id);
+      if (!playerState) continue;
 
-    SoccerService.broadcastBallState(io);
-    SoccerService.broadcastPlayerStates(io);
+      const dx = ball.x - player.x;
+      const dy = ball.y - player.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      this.resolveBallPlayerCollision(
+        io,
+        player.id,
+        playerState,
+        dx,
+        dy,
+        distance,
+        player.radius,
+      );
+    }
+  }
+
+  private static resolveBallPlayerCollision(
+    io: Server,
+    playerId: string,
+    player: PlayerState,
+    dx: number,
+    dy: number,
+    distance: number,
+    playerRadius: number,
+  ) {
+    const ball = this.ballState;
+    const safeDistance = Math.max(distance, 0.001);
+
+    const nx = dx / safeDistance;
+    const ny = dy / safeDistance;
+
+    const dotProduct = ball.vx * nx + ball.vy * ny;
+    ball.vx = ball.vx - 2 * dotProduct * nx;
+    ball.vy = ball.vy - 2 * dotProduct * ny;
+
+    const isPowerShot =
+      this.powerShotActivation &&
+      Date.now() < this.powerShotActivation.expiresAt;
+    const bounceDamping = isPowerShot
+      ? this.powerShotActivation!.ballRetention
+      : 0.6;
+
+    ball.vx *= bounceDamping;
+    ball.vy *= bounceDamping;
+
+    const overlap = this.BALL_RADIUS + playerRadius - safeDistance;
+    ball.x += nx * (overlap + 1);
+    ball.y += ny * (overlap + 1);
+
+    if (ball.lastTouchId !== playerId) {
+      const previousKickerState = ball.lastTouchId
+        ? getPlayerPositions().get(ball.lastTouchId)
+        : null;
+      if (previousKickerState && previousKickerState.team !== player.team) {
+        const stats = this.playerMatchStats.get(playerId) || {
+          goals: 0,
+          assists: 0,
+          interceptions: 0,
+        };
+        stats.interceptions++;
+        this.playerMatchStats.set(playerId, stats);
+      }
+
+      ball.previousTouchId = ball.lastTouchId;
+      ball.lastTouchId = playerId;
+    }
+    ball.lastTouchTimestamp = Date.now();
+
+    io.to("scene:SoccerMap").emit("ball:intercepted", {
+      playerId,
+      ballX: ball.x,
+      ballY: ball.y,
+      timestamp: Date.now(),
+    });
+  }
+
+  private static handleBallWallCollisions() {
+    const ball = this.ballState;
+
+    for (const rect of this.collisionRects) {
+      const collision = this.checkBallRectCollision(ball, rect);
+
+      if (collision) {
+        const normal = collision.normal;
+        const dotProduct = ball.vx * normal.x + ball.vy * normal.y;
+
+        ball.vx = ball.vx - 2 * dotProduct * normal.x;
+        ball.vy = ball.vy - 2 * dotProduct * normal.y;
+        ball.vx *= this.BOUNCE;
+        ball.vy *= this.BOUNCE;
+
+        const closestX = Math.max(
+          rect.x,
+          Math.min(ball.x, rect.x + rect.width),
+        );
+        const closestY = Math.max(
+          rect.y,
+          Math.min(ball.y, rect.y + rect.height),
+        );
+        const penetration =
+          this.BALL_RADIUS -
+          Math.sqrt(
+            Math.pow(ball.x - closestX, 2) + Math.pow(ball.y - closestY, 2),
+          );
+
+        ball.x += normal.x * (penetration + 1);
+        ball.y += normal.y * (penetration + 1);
+        break;
+      }
+    }
+  }
+
+  private static handleBallGoalCollisions(io: Server) {
+    const ball = this.ballState;
+
+    for (const goal of this.goalZones) {
+      if (this.checkBallInGoal(ball, goal)) {
+        this.scoreGoal(io, goal);
+        return;
+      }
+    }
+  }
+
+  private static checkBallInGoal(ball: BallState, goal: GoalZone): boolean {
+    return (
+      ball.x >= goal.x &&
+      ball.x <= goal.x + goal.width &&
+      ball.y >= goal.y &&
+      ball.y <= goal.y + goal.height
+    );
+  }
+
+  private static scoreGoal(io: Server, goal: GoalZone) {
+    const ball = this.ballState;
+    const scoringTeam = goal.team === "red" ? "blue" : "red";
+    this.score[scoringTeam]++;
+
+    if (ball.lastTouchId) {
+      const stats = this.playerMatchStats.get(ball.lastTouchId) || {
+        goals: 0,
+        assists: 0,
+        interceptions: 0,
+      };
+      stats.goals++;
+      this.playerMatchStats.set(ball.lastTouchId, stats);
+
+      if (ball.previousTouchId) {
+        const scorerState = getPlayerPositions().get(ball.lastTouchId);
+        const assisterState = getPlayerPositions().get(ball.previousTouchId);
+        if (
+          scorerState &&
+          assisterState &&
+          scorerState.team === assisterState.team
+        ) {
+          const assistStats = this.playerMatchStats.get(
+            ball.previousTouchId,
+          ) || {
+            goals: 0,
+            assists: 0,
+            interceptions: 0,
+          };
+          assistStats.assists++;
+          this.playerMatchStats.set(ball.previousTouchId, assistStats);
+        }
+      }
+    }
+
+    io.to("scene:SoccerMap").emit("goal:scored", {
+      scoringTeam,
+      goalName: goal.name,
+      lastTouchId: ball.lastTouchId,
+      score: { red: this.score.red, blue: this.score.blue },
+      timestamp: Date.now(),
+    });
+
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.isMoving = false;
+    this.goalScoredAt = Date.now();
+  }
+
+  private static finalizeGoalReset() {
+    this.ballState = {
+      x: this.WORLD_BOUNDS.width / 2,
+      y: this.WORLD_BOUNDS.height / 2,
+      vx: 0,
+      vy: 0,
+      lastTouchId: null,
+      previousTouchId: null,
+      lastTouchTimestamp: 0,
+      isMoving: false,
+    };
+    this.goalScoredAt = 0;
+    this.resetAllPlayerPositionsImmediate();
+
+    if (this.ioInstance) {
+      this.broadcastBallState(this.ioInstance);
+    }
+  }
+
+  private static handleBallBoundaryCollisions() {
+    const ball = this.ballState;
+
+    if (ball.x - this.BALL_RADIUS < 0) {
+      ball.x = this.BALL_RADIUS;
+      ball.vx = -ball.vx * this.BOUNCE;
+    } else if (ball.x + this.BALL_RADIUS > this.WORLD_BOUNDS.width) {
+      ball.x = this.WORLD_BOUNDS.width - this.BALL_RADIUS;
+      ball.vx = -ball.vx * this.BOUNCE;
+    }
+
+    if (ball.y - this.BALL_RADIUS < 0) {
+      ball.y = this.BALL_RADIUS;
+      ball.vy = -ball.vy * this.BOUNCE;
+    } else if (ball.y + this.BALL_RADIUS > this.WORLD_BOUNDS.height) {
+      ball.y = this.WORLD_BOUNDS.height - this.BALL_RADIUS;
+      ball.vy = -ball.vy * this.BOUNCE;
+    }
   }
 
   private static broadcastBallState(io: Server) {
@@ -579,12 +737,9 @@ export class SoccerService {
     });
   }
 
-  private static updatePlayerPhysics(io: Server, deltaTime: number) {
+  private static updatePlayerPhysics(io: Server, dt: number) {
     const players = Array.from(this.playerPhysics.values());
 
-    /**
-     *player collision
-     */
     for (let i = 0; i < players.length; i++) {
       for (let j = i + 1; j < players.length; j++) {
         const p1 = players[i];
@@ -592,15 +747,10 @@ export class SoccerService {
 
         if (!p1 || !p2) continue;
 
-        // Ninja Step: Skip collision if either player is ghosted has skill and not touching ball
         const p1Ghosted =
-          SoccerService.ninjaStepPlayers.has(p1.id) &&
-          !SoccerService.isTouchingBall(p1);
+          this.ninjaStepPlayers.has(p1.id) && !this.isTouchingBall(p1);
         const p2Ghosted =
-          SoccerService.ninjaStepPlayers.has(p2.id) &&
-          !SoccerService.isTouchingBall(p2);
-
-        // Spectator: Skip collision if either player is a spectator
+          this.ninjaStepPlayers.has(p2.id) && !this.isTouchingBall(p2);
         const p1Spectator = p1.team !== "red" && p1.team !== "blue";
         const p2Spectator = p2.team !== "red" && p2.team !== "blue";
 
@@ -619,10 +769,6 @@ export class SoccerService {
       }
     }
 
-    /**
-     * Ball to player collision
-     * knockback stuff I clamped the distance so it wono't be weird to look at front end
-     */
     for (const player of players) {
       const dx = this.ballState.x - player.x;
       const dy = this.ballState.y - player.y;
@@ -633,47 +779,14 @@ export class SoccerService {
         this.handleBallPlayerKnockback(player, dx, dy, distance);
       }
     }
+
     for (const player of players) {
-      player.x += player.vx * deltaTime;
-      player.y += player.vy * deltaTime;
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
 
       const isSpectator = player.team !== "red" && player.team !== "blue";
       if (isSpectator) {
-        for (const rect of this.collisionRects) {
-          const closestX = Math.max(
-            rect.x,
-            Math.min(player.x, rect.x + rect.width),
-          );
-          const closestY = Math.max(
-            rect.y,
-            Math.min(player.y, rect.y + rect.height),
-          );
-
-          const dx = player.x - closestX;
-          const dy = player.y - closestY;
-          const distance = Math.sqrt(dx * dx + dy * dy);
-
-          if (distance < player.radius) {
-            const overlap = player.radius - distance;
-            if (distance > 0) {
-              player.x += (dx / distance) * overlap;
-              player.y += (dy / distance) * overlap;
-            } else {
-              const dL = player.x - rect.x;
-              const dR = rect.x + rect.width - player.x;
-              const dT = player.y - rect.y;
-              const dB = rect.y + rect.height - player.y;
-              const min = Math.min(dL, dR, dT, dB);
-              if (min === dL) player.x = rect.x - player.radius;
-              else if (min === dR)
-                player.x = rect.x + rect.width + player.radius;
-              else if (min === dT) player.y = rect.y - player.radius;
-              else player.y = rect.y + rect.height + player.radius;
-            }
-            player.vx = 0;
-            player.vy = 0;
-          }
-        }
+        this.handleSpectatorWallCollisions(player);
       }
     }
 
@@ -692,6 +805,43 @@ export class SoccerService {
     }
   }
 
+  private static handleSpectatorWallCollisions(player: PlayerPhysicsState) {
+    for (const rect of this.collisionRects) {
+      const closestX = Math.max(
+        rect.x,
+        Math.min(player.x, rect.x + rect.width),
+      );
+      const closestY = Math.max(
+        rect.y,
+        Math.min(player.y, rect.y + rect.height),
+      );
+
+      const dx = player.x - closestX;
+      const dy = player.y - closestY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < player.radius) {
+        const overlap = player.radius - distance;
+        if (distance > 0) {
+          player.x += (dx / distance) * overlap;
+          player.y += (dy / distance) * overlap;
+        } else {
+          const dL = player.x - rect.x;
+          const dR = rect.x + rect.width - player.x;
+          const dT = player.y - rect.y;
+          const dB = rect.y + rect.height - player.y;
+          const min = Math.min(dL, dR, dT, dB);
+          if (min === dL) player.x = rect.x - player.radius;
+          else if (min === dR) player.x = rect.x + rect.width + player.radius;
+          else if (min === dT) player.y = rect.y - player.radius;
+          else player.y = rect.y + rect.height + player.radius;
+        }
+        player.vx = 0;
+        player.vy = 0;
+      }
+    }
+  }
+
   private static handlePlayerCollision(
     p1: PlayerPhysicsState,
     p2: PlayerPhysicsState,
@@ -699,11 +849,11 @@ export class SoccerService {
     dy: number,
     distance: number,
   ) {
-    const nx = dx / distance;
-    const ny = dy / distance;
+    const safeDistance = Math.max(distance, 0.001);
+    const nx = dx / safeDistance;
+    const ny = dy / safeDistance;
 
-    // Separate players push Apart
-    const overlap = p1.radius + p2.radius - distance;
+    const overlap = p1.radius + p2.radius - safeDistance;
     const separationX = nx * (overlap / 2);
     const separationY = ny * (overlap / 2);
 
@@ -731,31 +881,27 @@ export class SoccerService {
     );
 
     if (ballSpeed < 100) return;
-    const nx = -dx / distance;
-    const ny = -dy / distance;
+
+    const safeDistance = Math.max(distance, 0.001);
+    const nx = -dx / safeDistance;
+    const ny = -dy / safeDistance;
 
     const isPowerShot =
       this.powerShotActivation &&
       Date.now() < this.powerShotActivation.expiresAt;
-
-    // Apply enhanced knockback for power shot
     const knockbackMagnitude = isPowerShot
       ? this.powerShotActivation!.knockbackForce
       : Math.min(ballSpeed * this.BALL_KNOCKBACK, 200);
 
     player.vx += nx * knockbackMagnitude;
     player.vy += ny * knockbackMagnitude;
-
-    console.log(
-      `Player ${player.id} knocked back by ball: ${knockbackMagnitude.toFixed(0)} px/s${isPowerShot ? " (POWER SHOT)" : ""}`,
-    );
   }
 
   private static isTouchingBall(p: PlayerPhysicsState) {
     const dx = this.ballState.x - p.x;
     const dy = this.ballState.y - p.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    return dist < this.BALL_RADIUS + p.radius + 20; // 20px buffer
+    return dist < this.BALL_RADIUS + p.radius + 20;
   }
 
   private static broadcastPlayerStates(io: Server) {
@@ -767,7 +913,10 @@ export class SoccerService {
       vy: number;
       isGhosted: boolean;
       isSpectator: boolean;
+      timestamp: number;
     }> = [];
+
+    const timestamp = Date.now();
 
     for (const [id, player] of this.playerPhysics.entries()) {
       updates.push({
@@ -777,95 +926,15 @@ export class SoccerService {
         vx: player.vx,
         vy: player.vy,
         isGhosted:
-          SoccerService.ninjaStepPlayers.has(id) &&
-          !SoccerService.isTouchingBall(player),
+          this.ninjaStepPlayers.has(id) && !this.isTouchingBall(player),
         isSpectator: player.team !== "red" && player.team !== "blue",
+        timestamp,
       });
     }
 
     if (updates.length > 0) {
       io.to("scene:SoccerMap").emit("players:physicsUpdate", updates);
     }
-  }
-
-  private static handleBallPlayerCollision(
-    io: Server,
-    playerId: string,
-    player: PlayerState,
-    dx: number,
-    dy: number,
-    distance: number,
-    playerRadius: number,
-  ) {
-    const ball = this.ballState;
-
-    const nx = dx / distance;
-    const ny = dy / distance;
-
-    // Calculate reflection (v' = v - 2(v · n)n)
-    const dotProduct = ball.vx * nx + ball.vy * ny;
-    ball.vx = ball.vx - 2 * dotProduct * nx;
-    ball.vy = ball.vy - 2 * dotProduct * ny;
-
-    const isPowerShot =
-      SoccerService.powerShotActivation &&
-      Date.now() < SoccerService.powerShotActivation.expiresAt;
-
-    const bounceDamping = isPowerShot
-      ? SoccerService.powerShotActivation!.ballRetention
-      : 0.6;
-
-    ball.vx *= bounceDamping;
-    ball.vy *= bounceDamping;
-
-    if (isPowerShot) {
-      console.log(
-        `Ball bounced off player with power shot retention (${bounceDamping * 100}%)`,
-      );
-    }
-
-    const ballRadius = this.BALL_RADIUS;
-    const overlap = ballRadius + playerRadius - distance;
-    ball.x += nx * (overlap + 1);
-    ball.y += ny * (overlap + 1);
-
-    if (ball.lastTouchId !== playerId) {
-      // Interception logic
-      const previousKickerState = ball.lastTouchId
-        ? getPlayerPositions().get(ball.lastTouchId)
-        : null;
-      if (previousKickerState && previousKickerState.team !== player.team) {
-        const stats = this.playerMatchStats.get(playerId) || {
-          goals: 0,
-          assists: 0,
-          interceptions: 0,
-        };
-        stats.interceptions++;
-        this.playerMatchStats.set(playerId, stats);
-        console.log(
-          `Interception recorded for ${playerId}! Total: ${stats.interceptions}`,
-        );
-      }
-
-      ball.previousTouchId = ball.lastTouchId;
-      ball.lastTouchId = playerId;
-    }
-    ball.lastTouchTimestamp = Date.now();
-
-    const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
-    console.log(
-      `Ball intercepted by ${playerId}, bounced at ${speed.toFixed(0)}px/s`,
-    );
-
-    io.to("scene:SoccerMap").emit("ball:intercepted", {
-      playerId,
-      ballX: ball.x,
-      ballY: ball.y,
-    });
-  }
-
-  private broadcastBallState() {
-    SoccerService.broadcastBallState(this.io);
   }
 
   private static updateGameTimer(io: Server) {
@@ -904,7 +973,6 @@ export class SoccerService {
     }
 
     if (winner === "tie") {
-      console.log("Game tied! Adding 1 minute overtime...");
       this.gameTimeRemaining = this.OVERTIME_DURATION;
       this.isGameActive = true;
       this.lastTimerUpdate = Date.now();
@@ -914,7 +982,6 @@ export class SoccerService {
         duration: this.OVERTIME_DURATION,
       });
     } else {
-      // Calculate MVP
       let mvp: {
         id: string;
         name: string;
@@ -940,7 +1007,6 @@ export class SoccerService {
         }
       }
 
-      // --- MMR Calculation System ---
       const mmrUpdates: Array<{
         playerId: string;
         name: string;
@@ -954,7 +1020,6 @@ export class SoccerService {
       }> = [];
       const playerPositions = getPlayerPositions();
 
-      // Process MMR for everyone in the scene who was on a team
       const processMmr = async () => {
         for (const [playerId, player] of playerPositions.entries()) {
           if (
@@ -973,15 +1038,13 @@ export class SoccerService {
             interceptions: 0,
           };
 
-          // Calculate feats
           let featCount = 0;
-          if (stats.goals >= 2) featCount++; // Sniper
-          if (stats.assists >= 2) featCount++; // Playmaker
-          if (stats.interceptions >= 3) featCount++; // Guardian
+          if (stats.goals >= 2) featCount++;
+          if (stats.assists >= 2) featCount++;
+          if (stats.interceptions >= 3) featCount++;
 
           try {
-            // Get current persistent stats
-            const dbStats = await SoccerService.statsRepository.findByUserId(
+            const dbStats = await this.statsRepository.findByUserId(
               player.userId,
             );
             const currentMmr = dbStats?.mmr ?? MmrSystem.INITIAL_MMR;
@@ -995,14 +1058,12 @@ export class SoccerService {
               featCount,
             );
 
-            // Update Database
-            await SoccerService.statsRepository.updateMmr(player.userId, {
+            await this.statsRepository.updateMmr(player.userId, {
               mmr: calculation.newMMR,
               winStreak: calculation.newStreak,
             });
 
-            // Log Match History
-            await SoccerService.statsRepository.addMatchHistory({
+            await this.statsRepository.addMatchHistory({
               userId: player.userId,
               result: matchResult,
               isMVP,
@@ -1037,7 +1098,6 @@ export class SoccerService {
           }
         }
 
-        // Broadcast everything
         io.to("scene:SoccerMap").emit("soccer:gameEnd", {
           winner,
           score: this.score,
@@ -1057,14 +1117,98 @@ export class SoccerService {
       clearTimeout(this.selectionTimer);
       this.selectionTimer = null;
     }
+
+    for (const timeout of this.skillTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    this.skillTimeouts.clear();
+
     this.playerAssignedSkills.clear();
     this.playerMatchStats.clear();
+    this.playerSkillCooldowns.clear();
+    this.slowedPlayers.clear();
+    this.metavisionPlayers.clear();
+    this.ninjaStepPlayers.clear();
+    this.lurkingPlayers.clear();
+    this.playerBuffs.clear();
+    this.powerShotActivation = null;
 
     this.score = { red: 0, blue: 0 };
     this.gameTimeRemaining = this.DEFAULT_GAME_TIME;
     this.isGameActive = false;
-    this.resetBall(false);
-    this.resetAllPlayerPositions(false);
+    this.goalScoredAt = 0;
+    this.resetBallImmediate();
+    this.resetAllPlayerPositionsImmediate();
+  }
+
+  private static resetBallImmediate() {
+    this.ballState = {
+      x: this.WORLD_BOUNDS.width / 2,
+      y: this.WORLD_BOUNDS.height / 2,
+      vx: 0,
+      vy: 0,
+      lastTouchId: null,
+      previousTouchId: null,
+      lastTouchTimestamp: 0,
+      isMoving: false,
+    };
+  }
+
+  private static resetAllPlayerPositionsImmediate() {
+    const playerPositions = getPlayerPositions();
+    const redTeamPlayers: string[] = [];
+    const blueTeamPlayers: string[] = [];
+
+    for (const [playerId, player] of playerPositions.entries()) {
+      if (player.currentScene !== "SoccerMap") continue;
+
+      if (player.team === "red") {
+        redTeamPlayers.push(playerId);
+      } else if (player.team === "blue") {
+        blueTeamPlayers.push(playerId);
+      }
+    }
+
+    redTeamPlayers.forEach((playerId, index) => {
+      const spawn = this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length]!;
+      this.setPlayerPosition(playerId, spawn.x, spawn.y);
+    });
+
+    blueTeamPlayers.forEach((playerId, index) => {
+      const spawn =
+        this.BLUE_TEAM_SPAWNS[index % this.BLUE_TEAM_SPAWNS.length]!;
+      this.setPlayerPosition(playerId, spawn.x, spawn.y);
+    });
+  }
+
+  private static setPlayerPosition(playerId: string, x: number, y: number) {
+    const playerPositions = getPlayerPositions();
+    const playerPhysics = this.playerPhysics.get(playerId);
+    const playerState = playerPositions.get(playerId);
+
+    if (playerPhysics) {
+      playerPhysics.x = x;
+      playerPhysics.y = y;
+      playerPhysics.vx = 0;
+      playerPhysics.vy = 0;
+    }
+
+    if (playerState) {
+      playerState.x = x;
+      playerState.y = y;
+      playerState.vx = 0;
+      playerState.vy = 0;
+      playerPositions.set(playerId, playerState);
+    }
+
+    if (this.ioInstance) {
+      this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
+        playerId,
+        x,
+        y,
+        timestamp: Date.now(),
+      });
+    }
   }
 
   private static startSelectionPhase(io: Server) {
@@ -1116,16 +1260,12 @@ export class SoccerService {
       return;
     }
 
-    // Skip if player is no longer on a team
     const playerPositions = getPlayerPositions();
     const playerState = playerPositions.get(currentPickerId);
     if (
       !playerState ||
       (playerState.team !== "red" && playerState.team !== "blue")
     ) {
-      console.log(
-        `Skipping turn for player ${currentPickerId} as they are no longer on a team`,
-      );
       this.currentPickerIndex++;
       this.nextSelectionTurn(io);
       return;
@@ -1221,11 +1361,6 @@ export class SoccerService {
     });
   }
 
-  /**
-   *
-   * TODO: I should move this to a util or service
-   * skill turned based choosing
-   */
   private handleTeamAssignment(data: {
     playerId: string;
     team: "red" | "blue" | "spectator";
@@ -1273,69 +1408,46 @@ export class SoccerService {
         team: data.team,
         playerName: playerState.name,
       });
-
-      console.log(
-        `Player ${playerState.name} assigned to ${data.team || "no"} team`,
-      );
     }
   }
 
   private handleResetGame() {
-    // Reset state using static method
     SoccerService.resetGame();
 
-    // Broadcast reset to all players
     this.io.to("scene:SoccerMap").emit("soccer:gameReset", {
       score: SoccerService.score,
     });
-
-    console.log("Soccer game reset - back to lobby");
   }
 
   private handleStartGame() {
-    // Instead of starting immediately, start the selection phase
     SoccerService.startSelectionPhase(this.io);
-    console.log("Soccer selection phase started");
   }
 
   private handleRandomizeTeams() {
     const playerPositions = getPlayerPositions();
 
-    // Get all players in the SoccerMap scene
     const soccerPlayers = Array.from(playerPositions.values()).filter(
       (p) => p.currentScene === "SoccerMap",
     );
 
     if (soccerPlayers.length === 0) {
-      console.log("No players to randomize");
       return;
     }
 
-    // Shuffle players using Fisher-Yates algorithm
     const shuffled = [...soccerPlayers];
-    for (let i = 0; i < shuffled.length - 1; i++) {
+    for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      const temp = shuffled[i];
-      if (temp && shuffled[j]) {
-        shuffled[i] = shuffled[j]!;
-        shuffled[j] = temp;
-      }
+      [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
     }
 
-    // Split evenly between red and blue teams
     const midpoint = Math.ceil(shuffled.length / 2);
     const redTeam = shuffled.slice(0, midpoint);
     const blueTeam = shuffled.slice(midpoint);
 
-    // Assign teams
     redTeam.forEach((player) => {
       player.team = "red";
       playerPositions.set(player.id, player);
-
-      // Reset to red team spawn
       SoccerService.resetPlayerPosition(player.id, "red");
-
-      // Broadcast team assignment
       this.io.to("scene:SoccerMap").emit("soccer:teamAssigned", {
         playerId: player.id,
         team: "red",
@@ -1345,20 +1457,12 @@ export class SoccerService {
     blueTeam.forEach((player) => {
       player.team = "blue";
       playerPositions.set(player.id, player);
-
-      // Reset to blue team spawn
       SoccerService.resetPlayerPosition(player.id, "blue");
-
-      // Broadcast team assignment
       this.io.to("scene:SoccerMap").emit("soccer:teamAssigned", {
         playerId: player.id,
         team: "blue",
       });
     });
-
-    console.log(
-      `Randomized teams: ${redTeam.length} red, ${blueTeam.length} blue`,
-    );
   }
 
   private handleActivateSkill(data: SkillActivationData) {
@@ -1371,25 +1475,19 @@ export class SoccerService {
     const playerState = playerPositions.get(data.playerId);
     if (!playerState) return;
 
-    // Spectators cannot use skills
     if (playerState.team !== "red" && playerState.team !== "blue") {
       return;
     }
 
-    // Enforce skill ownership ONLY if game is active or in selection
     if (SoccerService.gameStatus !== GameStatus.LOBBY) {
       const assignedSkillId = SoccerService.playerAssignedSkills.get(
         data.playerId,
       );
       if (assignedSkillId !== skillId) {
-        console.log(
-          `Player ${data.playerId} tried to use unassigned skill ${skillId}`,
-        );
         return;
       }
     }
 
-    // Handle passive skill Ninja Step
     if (skillId === "ninja_step") {
       if (SoccerService.ninjaStepPlayers.has(data.playerId)) {
         SoccerService.ninjaStepPlayers.delete(data.playerId);
@@ -1397,7 +1495,6 @@ export class SoccerService {
         SoccerService.ninjaStepPlayers.add(data.playerId);
       }
 
-      // Broadcast toggle event so client can update visuals
       this.io.to("scene:SoccerMap").emit("soccer:skillActivated", {
         activatorId: data.playerId,
         skillId: skillId,
@@ -1413,13 +1510,10 @@ export class SoccerService {
       SoccerService.playerSkillCooldowns.get(data.playerId) || new Map();
     const lastUsed = playerCooldowns.get(skillId) || 0;
 
-    // Handle Lurking Radius (Two-Stage Skill)
     if (skillId === "lurking_radius") {
       const lurkingExpiration = SoccerService.lurkingPlayers.get(data.playerId);
 
-      // Stage 2: Trigger (Intercept) if already lurking
       if (lurkingExpiration && now < lurkingExpiration) {
-        // Check if ball is in range
         const ball = SoccerService.ballState;
         const playerPhysics = SoccerService.playerPhysics.get(data.playerId);
         if (playerPhysics) {
@@ -1433,13 +1527,11 @@ export class SoccerService {
               : 200;
 
           if (dist <= radius) {
-            const playerPositions = getPlayerPositions();
-            const playerState = playerPositions.get(data.playerId);
             const team = playerState?.team;
 
             let interceptX = ball.x;
             let interceptY = ball.y;
-            const offsetDistance = 40; // 40px from ball
+            const offsetDistance = 40;
 
             if (team === "red") {
               interceptX = ball.x - offsetDistance;
@@ -1476,6 +1568,13 @@ export class SoccerService {
 
             SoccerService.lurkingPlayers.delete(data.playerId);
 
+            const timeoutKey = `lurking_${data.playerId}`;
+            const existingTimeout = SoccerService.skillTimeouts.get(timeoutKey);
+            if (existingTimeout) {
+              clearTimeout(existingTimeout);
+              SoccerService.skillTimeouts.delete(timeoutKey);
+            }
+
             this.io.to("scene:SoccerMap").emit("soccer:skillTriggered", {
               activatorId: data.playerId,
               skillId: skillId,
@@ -1484,14 +1583,10 @@ export class SoccerService {
               targetY: interceptY,
             });
 
-            //don't wait for the next tick
             SoccerService.broadcastBallState(this.io);
             SoccerService.broadcastPlayerStates(this.io);
             return;
           } else {
-            console.log(
-              `Lurking Intercept Failed: Ball too far (${dist.toFixed(0)} > ${radius})`,
-            );
             return;
           }
         }
@@ -1516,7 +1611,8 @@ export class SoccerService {
         visualConfig: skillConfig.clientVisuals,
       });
 
-      setTimeout(() => {
+      const timeoutKey = `lurking_${data.playerId}`;
+      const timeout = setTimeout(() => {
         if (SoccerService.lurkingPlayers.has(data.playerId)) {
           SoccerService.lurkingPlayers.delete(data.playerId);
           this.io.to("scene:SoccerMap").emit("soccer:skillEnded", {
@@ -1524,8 +1620,10 @@ export class SoccerService {
             skillId: skillId,
           });
         }
+        SoccerService.skillTimeouts.delete(timeoutKey);
       }, skillConfig.durationMs);
 
+      SoccerService.skillTimeouts.set(timeoutKey, timeout);
       return;
     }
 
@@ -1539,11 +1637,9 @@ export class SoccerService {
       };
 
       const activatorPhysics = SoccerService.playerPhysics.get(data.playerId);
-      const playerPositions = getPlayerPositions();
       const activatorState = playerPositions.get(data.playerId);
 
       if (!activatorPhysics || !activatorState) {
-        console.log("Power Shot failed: Player not found");
         return;
       }
 
@@ -1554,9 +1650,6 @@ export class SoccerService {
       );
 
       if (distToBall > 200) {
-        console.log(
-          `Power Shot failed: Too far from ball (${distToBall.toFixed(0)} > 200)`,
-        );
         return;
       }
 
@@ -1568,7 +1661,6 @@ export class SoccerService {
       } else if (activatorState.team === "blue") {
         goalX = 120;
       } else {
-        console.log("Power Shot failed: Player has no team");
         return;
       }
 
@@ -1584,7 +1676,6 @@ export class SoccerService {
       ball.lastTouchTimestamp = now;
       ball.isMoving = true;
 
-      // Apply knockback to kicker recoil
       const knockbackVx = -Math.cos(angle) * SoccerService.KICK_KNOCKBACK;
       const knockbackVy = -Math.sin(angle) * SoccerService.KICK_KNOCKBACK;
       activatorPhysics.vx += knockbackVx;
@@ -1614,11 +1705,6 @@ export class SoccerService {
       });
 
       SoccerService.broadcastBallState(this.io);
-
-      console.log(
-        `Power Shot activated by ${data.playerId} (team: ${activatorState.team}) toward goal at angle ${((angle * 180) / Math.PI).toFixed(1)}°`,
-      );
-
       return;
     }
 
@@ -1681,10 +1767,6 @@ export class SoccerService {
           visualConfig: skillConfig.clientVisuals,
         });
 
-        console.log(
-          `Player ${data.playerId} blinked from (${startX}, ${startY}) to (${targetX}, ${targetY})`,
-        );
-
         return;
       }
     }
@@ -1692,11 +1774,8 @@ export class SoccerService {
     if (isSpeedEffect(skillConfig.serverEffect.params)) {
       const multiplier = skillConfig.serverEffect.params.multiplier;
 
-      for (const [playerId, playerState] of playerPositions.entries()) {
-        if (
-          playerState.currentScene !== "SoccerMap" ||
-          playerId === data.playerId
-        ) {
+      for (const [playerId, pState] of playerPositions.entries()) {
+        if (pState.currentScene !== "SoccerMap" || playerId === data.playerId) {
           continue;
         }
 
@@ -1723,7 +1802,8 @@ export class SoccerService {
       SoccerService.metavisionPlayers.add(data.playerId);
     }
 
-    setTimeout(() => {
+    const timeoutKey = `skill_${data.playerId}_${skillId}`;
+    const timeout = setTimeout(() => {
       for (const playerId of affectedPlayers) {
         SoccerService.slowedPlayers.delete(playerId);
       }
@@ -1736,7 +1816,11 @@ export class SoccerService {
         activatorId: data.playerId,
         skillId: skillId,
       });
+
+      SoccerService.skillTimeouts.delete(timeoutKey);
     }, skillConfig.durationMs);
+
+    SoccerService.skillTimeouts.set(timeoutKey, timeout);
   }
 
   private handleGetPlayers(
@@ -1762,16 +1846,41 @@ export class SoccerService {
 
   private cleanup() {
     SoccerService.activeConnections--;
+    const playerId = this.socket.id;
 
-    if (SoccerService.ballState.lastTouchId === this.socket.id) {
+    if (SoccerService.ballState.lastTouchId === playerId) {
       SoccerService.ballState.lastTouchId = null;
-      console.log(`Ball ownership cleared for ${this.socket.id}`);
     }
 
-    if (SoccerService.activeConnections === 0 && SoccerService.updateInterval) {
-      clearInterval(SoccerService.updateInterval);
-      SoccerService.updateInterval = null;
-      console.log("Stopped soccer ball physics loop (no active connections)");
+    SoccerService.playerSkillCooldowns.delete(playerId);
+    SoccerService.slowedPlayers.delete(playerId);
+    SoccerService.metavisionPlayers.delete(playerId);
+    SoccerService.ninjaStepPlayers.delete(playerId);
+    SoccerService.lurkingPlayers.delete(playerId);
+    SoccerService.playerBuffs.delete(playerId);
+    SoccerService.playerMatchStats.delete(playerId);
+    SoccerService.playerAssignedSkills.delete(playerId);
+    SoccerService.midGamePickers.delete(playerId);
+
+    const keysToDelete: string[] = [];
+    for (const key of SoccerService.skillTimeouts.keys()) {
+      if (key.includes(playerId)) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      const timeout = SoccerService.skillTimeouts.get(key);
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      SoccerService.skillTimeouts.delete(key);
+    }
+
+    if (
+      SoccerService.activeConnections === 0 &&
+      SoccerService.physicsLoopRunning
+    ) {
+      SoccerService.physicsLoopRunning = false;
     }
   }
 
@@ -1832,18 +1941,6 @@ export class SoccerService {
     return null;
   }
 
-  private static checkBallGoalCollision(
-    ball: BallState,
-    goal: GoalZone,
-  ): boolean {
-    return (
-      ball.x >= goal.x &&
-      ball.x <= goal.x + goal.width &&
-      ball.y >= goal.y &&
-      ball.y <= goal.y + goal.height
-    );
-  }
-
   private static loadMapCollisions() {
     try {
       const collisionDataPath = path.join(
@@ -1852,13 +1949,6 @@ export class SoccerService {
       );
 
       if (!fs.existsSync(collisionDataPath)) {
-        console.error(
-          "Soccer collision data file not found:",
-          collisionDataPath,
-        );
-        console.error(
-          "Create this file with collision rectangles from your Tiled map",
-        );
         this.mapLoaded = true;
         return;
       }
@@ -1871,7 +1961,6 @@ export class SoccerService {
         !collisionData.collisions ||
         !Array.isArray(collisionData.collisions)
       ) {
-        console.error("Invalid collision data format");
         this.mapLoaded = true;
         return;
       }
@@ -1887,7 +1976,6 @@ export class SoccerService {
 
       this.mapLoaded = true;
     } catch (error) {
-      console.error("Failed to load soccer collision data:", error);
       this.mapLoaded = true;
     }
   }
@@ -1904,7 +1992,6 @@ export class SoccerService {
       const goalData = JSON.parse(fs.readFileSync(goalDataPath, "utf-8"));
 
       if (!goalData.goals || !Array.isArray(goalData.goals)) {
-        console.error("Invalid goal data format");
         this.goalsLoaded = true;
         return;
       }
@@ -2031,15 +2118,11 @@ export class SoccerService {
         return { x: startX, y: startY };
       }
     }
-    return null; // No collision
+    return null;
   }
 
-  // Broadcast current physics state to a specific player for joins
   public static broadcastInitialPhysicsState(socketId: string) {
     if (!this.ioInstance) {
-      console.error(
-        "Cannot broadcast initial physics: io instance not available",
-      );
       return;
     }
 
@@ -2049,7 +2132,10 @@ export class SoccerService {
       y: number;
       vx: number;
       vy: number;
+      timestamp: number;
     }> = [];
+
+    const timestamp = Date.now();
 
     for (const [id, player] of this.playerPhysics.entries()) {
       updates.push({
@@ -2058,39 +2144,20 @@ export class SoccerService {
         y: player.y,
         vx: player.vx,
         vy: player.vy,
+        timestamp,
       });
     }
 
     if (updates.length > 0) {
       this.ioInstance.to(socketId).emit("players:physicsUpdate", updates);
-      console.log(
-        `Sent initial physics state (${updates.length} players) to ${socketId}`,
-      );
     }
   }
 
   public static resetBall(withDelay: boolean = true) {
-    const resetAction = () => {
-      this.ballState = {
-        x: this.WORLD_BOUNDS.width / 2,
-        y: this.WORLD_BOUNDS.height / 2,
-        vx: 0,
-        vy: 0,
-        lastTouchId: null,
-        previousTouchId: null,
-        lastTouchTimestamp: 0,
-        isMoving: false,
-      };
-
-      this.hasScoredGoal = false;
-      console.log("Ball reset to center");
-    };
-
     if (withDelay) {
-      this.hasScoredGoal = true;
-      setTimeout(resetAction, 3000);
+      this.goalScoredAt = Date.now();
     } else {
-      resetAction();
+      this.resetBallImmediate();
     }
   }
 
@@ -2103,10 +2170,9 @@ export class SoccerService {
     team: "red" | "blue" | "spectator",
   ) {
     const playerPositions = getPlayerPositions();
-    const playerPhysics = this.playerPhysics.get(playerId);
     const playerState = playerPositions.get(playerId);
 
-    if (!playerState || !playerPhysics) return;
+    if (!playerState) return;
 
     let targetX: number;
     let targetY: number;
@@ -2115,7 +2181,6 @@ export class SoccerService {
       targetX = this.SPECTATOR_SPAWN.x;
       targetY = this.SPECTATOR_SPAWN.y;
     } else {
-      // Get team spawns
       const spawns =
         team === "red" ? this.RED_TEAM_SPAWNS : this.BLUE_TEAM_SPAWNS;
 
@@ -2123,115 +2188,11 @@ export class SoccerService {
         (p) => p.team === team && p.currentScene === "SoccerMap",
       );
       const spawnIndex = Math.min(teamPlayers.length - 1, spawns.length - 1);
-      const spawn = spawns[spawnIndex] || spawns[0]!;
+      const spawn = spawns[Math.max(0, spawnIndex)] || spawns[0]!;
       targetX = spawn.x;
       targetY = spawn.y;
     }
 
-    playerPhysics.x = targetX;
-    playerPhysics.y = targetY;
-    playerPhysics.vx = 0;
-    playerPhysics.vy = 0;
-
-    playerState.x = targetX;
-    playerState.y = targetY;
-    playerState.vx = 0;
-    playerState.vy = 0;
-
-    playerPositions.set(playerId, playerState);
-
-    if (this.ioInstance) {
-      this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
-        playerId,
-        x: targetX,
-        y: targetY,
-      });
-    }
-  }
-
-  private static resetAllPlayerPositions(withDelay: boolean = true) {
-    const resetAction = () => {
-      const playerPositions = getPlayerPositions();
-      const redTeamPlayers: string[] = [];
-      const blueTeamPlayers: string[] = [];
-
-      for (const [playerId, player] of playerPositions.entries()) {
-        if (player.currentScene !== "SoccerMap") continue;
-
-        if (player.team === "red") {
-          redTeamPlayers.push(playerId);
-        } else if (player.team === "blue") {
-          blueTeamPlayers.push(playerId);
-        }
-      }
-
-      redTeamPlayers.forEach((playerId, index) => {
-        const spawn =
-          this.RED_TEAM_SPAWNS[index % this.RED_TEAM_SPAWNS.length]!;
-        const playerPhysics = this.playerPhysics.get(playerId);
-        const playerState = playerPositions.get(playerId);
-
-        if (playerPhysics && playerState) {
-          playerPhysics.x = spawn.x;
-          playerPhysics.y = spawn.y;
-          playerPhysics.vx = 0;
-          playerPhysics.vy = 0;
-
-          playerState.x = spawn.x;
-          playerState.y = spawn.y;
-          playerState.vx = 0;
-          playerState.vy = 0;
-
-          playerPositions.set(playerId, playerState);
-
-          if (this.ioInstance) {
-            this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
-              playerId,
-              x: spawn.x,
-              y: spawn.y,
-            });
-          }
-        }
-      });
-
-      blueTeamPlayers.forEach((playerId, index) => {
-        const spawn =
-          this.BLUE_TEAM_SPAWNS[index % this.BLUE_TEAM_SPAWNS.length]!;
-        const playerPhysics = this.playerPhysics.get(playerId);
-        const playerState = playerPositions.get(playerId);
-
-        if (playerPhysics && playerState) {
-          playerPhysics.x = spawn.x;
-          playerPhysics.y = spawn.y;
-          playerPhysics.vx = 0;
-          playerPhysics.vy = 0;
-
-          playerState.x = spawn.x;
-          playerState.y = spawn.y;
-          playerState.vx = 0;
-          playerState.vy = 0;
-
-          playerPositions.set(playerId, playerState);
-
-          if (this.ioInstance) {
-            this.ioInstance.to("scene:SoccerMap").emit("soccer:playerReset", {
-              playerId,
-              x: spawn.x,
-              y: spawn.y,
-            });
-          }
-        }
-      });
-
-      console.log(
-        `Reset ${redTeamPlayers.length} red team and ${blueTeamPlayers.length} blue team players`,
-      );
-    };
-
-    if (withDelay) {
-      setTimeout(resetAction, 3000);
-    } else {
-      resetAction();
-    }
+    this.setPlayerPosition(playerId, targetX, targetY);
   }
 }
