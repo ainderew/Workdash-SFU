@@ -703,7 +703,7 @@ export class SoccerService {
       vy: this.ballState.vy,
       lastTouchId: this.ballState.lastTouchId,
       timestamp: Date.now(),
-      sequence: this.ballState.sequence,
+      sequence: this.ballState.sequence || 0,
     });
   }
 

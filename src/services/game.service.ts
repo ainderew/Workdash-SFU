@@ -56,6 +56,7 @@ export class GameService {
         down: boolean;
         left: boolean;
         right: boolean;
+        sequence?: number;
       }) => {
         this.handlePlayerInput(input);
       },
@@ -104,6 +105,7 @@ export class GameService {
     down: boolean;
     left: boolean;
     right: boolean;
+    sequence?: number;
   }) {
     const playerState = playerPositions.get(this.socket.id);
     if (!playerState || playerState.currentScene !== "SoccerMap") return;
