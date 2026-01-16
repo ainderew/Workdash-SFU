@@ -498,11 +498,11 @@ export class SoccerService {
 
       // 2. Throttle Network Broadcasts (20Hz) - Sends approx every 3rd real-time frame
       // We broadcast the latest state after running the fixed steps
-      this.tickCount++;
-      if (this.tickCount % 3 === 0) {
-        SoccerService.broadcastBallState(io);
-        SoccerService.broadcastPlayerStates(io);
-      }
+      // this.tickCount++;
+      // if (this.tickCount % 3 === 0) {
+      SoccerService.broadcastBallState(io);
+      SoccerService.broadcastPlayerStates(io);
+      // }
     }, 16); // Interval remains 16ms for 60Hz target
   }
 
