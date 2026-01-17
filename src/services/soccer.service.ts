@@ -1,3 +1,4 @@
+import { integrateBall, PHYSICS_CONSTANTS } from "./shared-physics.js";
 import { Socket, Server } from "socket.io";
 import { GameEventEnums } from "./_enums.js";
 import type {
@@ -128,8 +129,11 @@ export class SoccerService {
   private static readonly KICK_KNOCKBACK = 400;
 
   private static updateInterval: NodeJS.Timeout | null = null;
-  private static lastTickTime = Date.now();
+  // private static lastTickTime = Date.now(); // Replaced by hrtime
+  private static lastTime = process.hrtime();
   private static accumulator = 0;
+  private static networkAccumulator = 0;
+  private static readonly NETWORK_TICK_MS = 50; // 20Hz
   private static readonly PHYSICS_TICK_MS = 16.666; // Fixed 60Hz
   private static activeConnections = 0;
   private static lastKickTime = 0;
@@ -471,39 +475,47 @@ export class SoccerService {
     this.broadcastBallState();
   }
 
+
+
   private static startPhysicsLoop(io: Server) {
-    this.lastTickTime = Date.now();
+    this.lastTime = process.hrtime();
     this.accumulator = 0;
+    this.networkAccumulator = 0;
 
+    // Run as fast as Node allows to minimize input latency
     this.updateInterval = setInterval(() => {
-      const now = Date.now();
-      let frameTime = now - this.lastTickTime;
-      if (frameTime > 250) frameTime = 250; // Clamp to avoid spiral of death
-      this.lastTickTime = now;
+        this.serverLoop(io);
+    }, 0); 
+  }
 
-      this.accumulator += frameTime;
+  private static serverLoop(io: Server) {
+    // 1. Calculate Real Delta Time
+    const diff = process.hrtime(this.lastTime);
+    const dt = (diff[0] * 1000) + (diff[1] / 1e6); // ms
+    this.lastTime = process.hrtime();
 
-      while (this.accumulator >= this.PHYSICS_TICK_MS) {
-        const dt = this.PHYSICS_TICK_MS / 1000;
+    this.accumulator += dt;
+    this.networkAccumulator += dt;
 
-        // 1. Run Physics with fixed dt
-        this.updateBallPhysics(io, dt);
-        this.updateGameTimer(io, dt);
+    // Safety Cap (prevent spiral of death)
+    if (this.accumulator > 250) this.accumulator = 250;
 
-        // Record history for lag comp (every tick)
-        this.recordHistory();
+    // 2. Consume Physics Accumulator (Strict 60Hz)
+    while (this.accumulator >= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS) {
+        // Run Physics
+        this.updateBallPhysics(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
+        this.updateGameTimer(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
+        this.recordHistory(); // Important for Lag Comp
 
-        this.accumulator -= this.PHYSICS_TICK_MS;
-      }
+        this.accumulator -= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
+    }
 
-      // 2. Throttle Network Broadcasts (20Hz) - Sends approx every 3rd real-time frame
-      // We broadcast the latest state after running the fixed steps
-      // this.tickCount++;
-      // if (this.tickCount % 3 === 0) {
-      SoccerService.broadcastBallState(io);
-      SoccerService.broadcastPlayerStates(io);
-      // }
-    }, 16); // Interval remains 16ms for 60Hz target
+    // 3. Consume Network Accumulator (Strict 20Hz)
+    if (this.networkAccumulator >= this.NETWORK_TICK_MS) {
+        this.broadcastBallState(io);
+        this.broadcastPlayerStates(io);
+        this.networkAccumulator -= this.NETWORK_TICK_MS;
+    }
   }
 
   private static recordHistory() {
@@ -531,12 +543,8 @@ export class SoccerService {
   private static updateBallPhysics(io: Server, dt: number) {
     const ball = this.ballState;
     if (ball.isMoving) {
-      const dragFactor = Math.exp(-this.DRAG * dt);
-      ball.vx *= dragFactor;
-      ball.vy *= dragFactor;
-
-      ball.x += ball.vx * dt;
-      ball.y += ball.vy * dt;
+      // USE SHARED KERNEL
+      integrateBall(ball, dt);
 
       const playersInScene = Array.from(this.playerPhysics.values());
       for (const player of playersInScene) {
@@ -665,24 +673,7 @@ export class SoccerService {
         }
       }
 
-      // Boundary collision with bounce
-      if (ball.x - this.BALL_RADIUS < 0) {
-        ball.x = this.BALL_RADIUS;
-        ball.vx = -ball.vx * this.BOUNCE;
-      } else if (ball.x + this.BALL_RADIUS > this.WORLD_BOUNDS.width) {
-        ball.x = this.WORLD_BOUNDS.width - this.BALL_RADIUS;
-        ball.vx = -ball.vx * this.BOUNCE;
-      }
-
-      if (ball.y - this.BALL_RADIUS < 0) {
-        ball.y = this.BALL_RADIUS;
-        ball.vy = -ball.vy * this.BOUNCE;
-      } else if (ball.y + this.BALL_RADIUS > this.WORLD_BOUNDS.height) {
-        ball.y = this.WORLD_BOUNDS.height - this.BALL_RADIUS;
-        ball.vy = -ball.vy * this.BOUNCE;
-      }
-
-      // Stop if velocity too low
+      // Stop check
       const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
       if (speed < this.VELOCITY_THRESHOLD) {
         ball.vx = 0;
@@ -2275,6 +2266,7 @@ export class SoccerService {
 
   public static resetBall(withDelay: boolean = true) {
     const resetAction = () => {
+      const nextSequence = (this.ballState.sequence || 0) + 1;
       this.ballState = {
         x: this.WORLD_BOUNDS.width / 2,
         y: this.WORLD_BOUNDS.height / 2,
@@ -2284,6 +2276,7 @@ export class SoccerService {
         previousTouchId: null,
         lastTouchTimestamp: 0,
         isMoving: false,
+        sequence: nextSequence,
       };
 
       this.hasScoredGoal = false;
