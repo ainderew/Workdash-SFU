@@ -93,7 +93,9 @@ export class SoccerService {
   /**
    * Singleton on purpose do not change please
    */
-  private static ballState: BallState & { previousTouchId: string | null } = {
+  private static ballState: BallState & {
+    previousTouchId: string | null;
+  } = {
     x: 1760,
     y: 800,
     vx: 0,
@@ -104,6 +106,8 @@ export class SoccerService {
     isMoving: false,
     sequence: 0,
   };
+
+  private static currentTick = 0;
 
   // exponential drag v(t) = v0 * e^(-DRAG * t)
   private static readonly DRAG = 1;
@@ -498,10 +502,11 @@ export class SoccerService {
     this.networkAccumulator += dt;
 
     // Safety Cap (prevent spiral of death)
-    if (this.accumulator > 250) this.accumulator = 250;
+    if (this.accumulator > 60) this.accumulator = 60;
 
     // 2. Consume Physics Accumulator (Strict 60Hz)
     while (this.accumulator >= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS) {
+        this.currentTick++;
         // Run Physics
         this.updateBallPhysics(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
         this.updateGameTimer(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
@@ -695,6 +700,7 @@ export class SoccerService {
       lastTouchId: this.ballState.lastTouchId,
       timestamp: Date.now(),
       sequence: this.ballState.sequence || 0,
+      tick: this.currentTick,
     });
   }
 
