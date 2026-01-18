@@ -1,4 +1,11 @@
-import { integrateBall, PHYSICS_CONSTANTS } from "./shared-physics.js";
+import {
+  integrateBall,
+  integratePlayer,
+  calculateKickVelocity,
+  calculateSpeedMultiplier,
+  calculateDragMultiplier,
+  PHYSICS_CONSTANTS,
+} from "./shared-physics.js";
 import { Socket, Server } from "socket.io";
 import { GameEventEnums } from "./_enums.js";
 import type {
@@ -93,52 +100,55 @@ export class SoccerService {
   /**
    * Singleton on purpose do not change please
    */
-  private static ballState: BallState & {
-    previousTouchId: string | null;
-  } = {
+  private static ballState = {
     x: 1760,
     y: 800,
     vx: 0,
     vy: 0,
-    lastTouchId: null,
-    previousTouchId: null,
+    sequence: 0,
+    lastTouchId: null as string | null,
+    previousTouchId: null as string | null,
     lastTouchTimestamp: 0,
     isMoving: false,
-    sequence: 0,
   };
 
   private static currentTick = 0;
+  private static lastTime = process.hrtime();
+  private static accumulator = 0;
+  private static networkAccumulator = 0;
+
+  private static updateInterval: NodeJS.Timeout | null = null;
+
+  private static readonly BASE_KICK_POWER = 1000;
+  private static readonly KICK_COOLDOWN_MS = 300;
+  private static readonly KICK_KNOCKBACK = 400;
 
   // exponential drag v(t) = v0 * e^(-DRAG * t)
-  private static readonly DRAG = 1;
-  private static readonly PLAYER_DRAG = 4; // Snappier movement control
-  private static readonly BASE_ACCEL = 1600;
-  private static readonly BASE_MAX_SPEED = 600;
-  private static readonly BOUNCE = 0.7;
-  private static readonly BALL_RADIUS = 30;
+  private static readonly DRAG = PHYSICS_CONSTANTS.BALL_DRAG;
+  private static readonly PLAYER_DRAG = PHYSICS_CONSTANTS.PLAYER_DRAG;
+  private static readonly BASE_ACCEL = PHYSICS_CONSTANTS.PLAYER_ACCEL;
+  private static readonly BASE_MAX_SPEED = PHYSICS_CONSTANTS.PLAYER_MAX_SPEED;
+  private static readonly BOUNCE = PHYSICS_CONSTANTS.BALL_BOUNCE;
+  private static readonly BALL_RADIUS = PHYSICS_CONSTANTS.BALL_RADIUS;
   /**
    * Physics runs at 60Hz (16.6ms)
    * Network broadcasts are throttled to 20Hz
    */
-  private static readonly UPDATE_INTERVAL_MS = 16.6; // 60Hz
-  private static readonly VELOCITY_THRESHOLD = 10;
-  private static readonly WORLD_BOUNDS = { width: 3520, height: 1600 };
-  private static readonly KICK_COOLDOWN_MS = 300;
+  private static readonly UPDATE_INTERVAL_MS = PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
+  private static readonly VELOCITY_THRESHOLD = PHYSICS_CONSTANTS.VELOCITY_STOP_THRESHOLD;
+  private static readonly WORLD_BOUNDS = { 
+    width: PHYSICS_CONSTANTS.WORLD_WIDTH, 
+    height: PHYSICS_CONSTANTS.WORLD_HEIGHT 
+  };
   private static readonly MAX_DRIBBLE_DISTANCE = 300;
 
   private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
-  private static readonly PLAYER_RADIUS = 30;
+  private static readonly PLAYER_RADIUS = PHYSICS_CONSTANTS.PLAYER_RADIUS;
   private static readonly PUSH_DAMPING = 1.5;
   private static readonly BALL_KNOCKBACK = 0.6;
-  private static readonly KICK_KNOCKBACK = 400;
 
-  private static updateInterval: NodeJS.Timeout | null = null;
-  // private static lastTickTime = Date.now(); // Replaced by hrtime
-  private static lastTime = process.hrtime();
-  private static accumulator = 0;
-  private static networkAccumulator = 0;
-  private static readonly NETWORK_TICK_MS = 50; // 20Hz
-  private static readonly PHYSICS_TICK_MS = 16.666; // Fixed 60Hz
+  private static readonly NETWORK_TICK_MS = PHYSICS_CONSTANTS.NETWORK_TICK_MS;
+  private static readonly PHYSICS_TICK_MS = PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
   private static activeConnections = 0;
   private static lastKickTime = 0;
   private static tickCount = 0; // Throttling counter
@@ -304,134 +314,129 @@ export class SoccerService {
   private handleBallKick(data: BallKickData) {
     const now = Date.now();
 
+    // === Cooldown Check ===
     if (now - SoccerService.lastKickTime < SoccerService.KICK_COOLDOWN_MS) {
       return;
     }
 
-    const ballState = SoccerService.ballState;
+    // === Player Validation ===
     const kickerPhysics = SoccerService.playerPhysics.get(data.playerId);
     const playerPositions = getPlayerPositions();
     const playerState = playerPositions.get(data.playerId);
 
     if (!kickerPhysics || !playerState) return;
 
+    // Only active players can kick
     if (playerState.team !== "red" && playerState.team !== "blue") {
       return;
     }
 
-    // Lag Compensation: Rewind both player and ball to their positions at data.timestamp
-    let validatedPlayerX = kickerPhysics.x;
-    let validatedPlayerY = kickerPhysics.y;
-    let validatedBallX = ballState.x;
-    let validatedBallY = ballState.y;
+    // === Lag Compensation: Rewind to client's timestamp ===
+    let kickerX = kickerPhysics.x;
+    let kickerY = kickerPhysics.y;
+    let ballX = SoccerService.ballState.x;
+    let ballY = SoccerService.ballState.y;
 
     if (data.timestamp) {
-      // 1. Rewind Player
-      const playerHistory = SoccerService.playerHistory.get(data.playerId);
-      if (playerHistory && playerHistory.length > 0) {
-        let closest = playerHistory[0];
-        if (closest) {
-          let minDiff = Math.abs(data.timestamp - closest.timestamp);
-          for (const entry of playerHistory) {
-            const diff = Math.abs(data.timestamp - entry.timestamp);
-            if (diff < minDiff) {
-              minDiff = diff;
-              closest = entry;
-            }
-          }
-          if (minDiff < 500 && closest) {
-            validatedPlayerX = closest.x;
-            validatedPlayerY = closest.y;
-          }
+      // Rewind player position
+      const playerHist = SoccerService.playerHistory.get(data.playerId);
+      if (playerHist && playerHist.length > 0) {
+        const rewound = SoccerService.findClosestHistoryState(
+          playerHist,
+          data.timestamp,
+        );
+        if (rewound) {
+          kickerX = rewound.x;
+          kickerY = rewound.y;
         }
       }
 
-      // 2. Rewind Ball
+      // Rewind ball position
       if (SoccerService.ballHistory.length > 0) {
-        let closestBall = SoccerService.ballHistory[0];
-        if (closestBall) {
-          let minDiff = Math.abs(data.timestamp - closestBall.timestamp);
-          for (const entry of SoccerService.ballHistory) {
-            const diff = Math.abs(data.timestamp - entry.timestamp);
-            if (diff < minDiff) {
-              minDiff = diff;
-              closestBall = entry;
-            }
-          }
-          if (minDiff < 500 && closestBall) {
-            validatedBallX = closestBall.x;
-            validatedBallY = closestBall.y;
-          }
+        const rewound = SoccerService.findClosestHistoryState(
+          SoccerService.ballHistory,
+          data.timestamp,
+        );
+        if (rewound) {
+          ballX = rewound.x;
+          ballY = rewound.y;
         }
       }
-
-      console.log(
-        `Lag Comp: Kick validation rewound to ${data.timestamp} (Player: ${validatedPlayerX.toFixed(0)},${validatedPlayerY.toFixed(0)} | Ball: ${validatedBallX.toFixed(0)},${validatedBallY.toFixed(0)})`,
-      );
     }
 
-    // Check kick range using rewound positions
-    const dx_dist = validatedBallX - validatedPlayerX;
-    const dy_dist = validatedBallY - validatedPlayerY;
-    const distance = Math.sqrt(dx_dist * dx_dist + dy_dist * dy_dist);
+    // === Distance Validation ===
+    const dx = ballX - kickerX;
+    const dy = ballY - kickerY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
 
+    // Allow some tolerance for network jitter
     const isMetaVisionActive = SoccerService.metavisionPlayers.has(
       data.playerId,
     );
-    const kickThreshold = isMetaVisionActive ? 200 : 140;
-
-    if (distance > kickThreshold) {
+    const maxKickDistance = isMetaVisionActive ? 300 : 250; // Generous to account for lag
+    if (distance > maxKickDistance) {
       console.log(
-        `Kick rejected for ${data.playerId}: distance ${distance.toFixed(0)} > ${kickThreshold}`,
+        `[Soccer] Kick rejected: distance ${distance.toFixed(0)} > ${maxKickDistance}`,
       );
       return;
     }
 
+    // === Apply Kick ===
     SoccerService.lastKickTime = now;
 
-    let kickPowerStat = kickerPhysics?.soccerStats?.kickPower ?? 0;
-
+    // Calculate kick velocity using shared function (ensures client/server match)
+    let kickPowerStat = kickerPhysics.soccerStats?.kickPower ?? 0;
     const buffs = SoccerService.playerBuffs.get(data.playerId);
     if (buffs?.kickPower && Date.now() < buffs.kickPower.expiresAt) {
       kickPowerStat += buffs.kickPower.value;
-      console.log(`Kick power buffed: ${kickPowerStat} (base + buff)`);
     }
 
-    let kickPowerMultiplier = 1.0 + kickPowerStat * 0.1;
+    const kickVelocity = calculateKickVelocity(
+      data.angle,
+      data.kickPower || SoccerService.BASE_KICK_POWER,
+      kickPowerStat,
+      isMetaVisionActive,
+    );
 
-    if (isMetaVisionActive) {
-      kickPowerMultiplier *= 1.2;
+    const ball = SoccerService.ballState;
+
+    // CRITICAL: Increment sequence BEFORE changing velocity
+    // This allows clients to detect "a new kick happened"
+    ball.sequence++;
+
+    // Apply velocity
+    ball.vx = kickVelocity.vx;
+    ball.vy = kickVelocity.vy;
+    ball.isMoving = true;
+
+    // Update touch tracking
+    if (ball.lastTouchId !== data.playerId) {
+      ball.previousTouchId = ball.lastTouchId;
+      ball.lastTouchId = data.playerId;
     }
+    ball.lastTouchTimestamp = now;
 
-    const kickVx = Math.cos(data.angle) * data.kickPower * kickPowerMultiplier;
-    const kickVy = Math.sin(data.angle) * data.kickPower * kickPowerMultiplier;
-
-    ballState.vx = kickVx;
-    ballState.vy = kickVy;
-    ballState.sequence = (ballState.sequence || 0) + 1;
-    if (ballState.lastTouchId !== data.playerId) {
-      ballState.previousTouchId = ballState.lastTouchId;
-      ballState.lastTouchId = data.playerId;
-    }
-    ballState.lastTouchTimestamp = now;
-    ballState.isMoving = true;
-
+    // Apply knockback to kicker
     const knockbackVx = -Math.cos(data.angle) * SoccerService.KICK_KNOCKBACK;
     const knockbackVy = -Math.sin(data.angle) * SoccerService.KICK_KNOCKBACK;
     kickerPhysics.vx += knockbackVx;
     kickerPhysics.vy += knockbackVy;
 
     console.log(
-      `Ball kicked by ${data.playerId}${isMetaVisionActive ? " (METAVISION)" : ""}: power=${data.kickPower}, angle=${data.angle.toFixed(2)}, mult=${kickPowerMultiplier.toFixed(2)}`,
+      `[Soccer] Kick by ${data.playerId}: seq=${ball.sequence}, vel=(${ball.vx.toFixed(0)}, ${ball.vy.toFixed(0)})`,
     );
 
+    // Broadcast kick event for sound/visual effects on other clients
     this.io.to("scene:SoccerMap").emit(GameEventEnums.BALL_KICKED, {
       kickerId: data.playerId,
-      kickPower: data.kickPower,
-      ballX: ballState.x,
-      ballY: ballState.y,
+      sequence: ball.sequence, // Include sequence so clients know which kick this is
+      ballX: ball.x,
+      ballY: ball.y,
+      vx: ball.vx,
+      vy: ball.vy,
     });
 
+    // Immediately broadcast authoritative state
     this.broadcastBallState();
   }
 
@@ -452,15 +457,21 @@ export class SoccerService {
       return;
     }
 
+    // 1. GET SERVER AUTHORITATIVE POSITION (Fixes the inconsistency)
+    const playerPhysics = SoccerService.playerPhysics.get(data.playerId);
+    if (!playerPhysics) return;
+
     const ballState = SoccerService.ballState;
 
-    // Calculate distance from player to ball
-    const dx = ballState.x - data.playerX;
-    const dy = ballState.y - data.playerY;
+    // 2. USE SERVER COORDINATES, NOT CLIENT DATA
+    const dx = ballState.x - playerPhysics.x;
+    const dy = ballState.y - playerPhysics.y;
     const distance = Math.sqrt(dx * dx + dy * dy);
 
+    // 3. STRICT CHECK
     if (distance > SoccerService.MAX_DRIBBLE_DISTANCE) {
-      return;
+        // Optional: Send a "correction" packet to client here to snap them back
+        return;
     }
 
     const dribblePower = 300;
@@ -486,63 +497,116 @@ export class SoccerService {
     this.accumulator = 0;
     this.networkAccumulator = 0;
 
-    // Run as fast as Node allows to minimize input latency
-    this.updateInterval = setInterval(() => {
-        this.serverLoop(io);
-    }, 0); 
+    // Run physics loop
+    // Using setImmediate for more consistent timing than setInterval(0)
+    const loop = () => {
+      this.serverTick(io);
+      setImmediate(loop);
+    };
+
+    setImmediate(loop);
   }
 
-  private static serverLoop(io: Server) {
-    // 1. Calculate Real Delta Time
+  private static serverTick(io: Server) {
+    // Calculate delta time using high-resolution timer
     const diff = process.hrtime(this.lastTime);
-    const dt = (diff[0] * 1000) + (diff[1] / 1e6); // ms
+    const dtMs = diff[0] * 1000 + diff[1] / 1e6;
     this.lastTime = process.hrtime();
 
-    this.accumulator += dt;
-    this.networkAccumulator += dt;
+    // Accumulate time
+    this.accumulator += dtMs;
+    this.networkAccumulator += dtMs;
 
-    // Safety Cap (prevent spiral of death)
-    if (this.accumulator > 60) this.accumulator = 60;
-
-    // 2. Consume Physics Accumulator (Strict 60Hz)
-    while (this.accumulator >= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS) {
-        this.currentTick++;
-        // Run Physics
-        this.updateBallPhysics(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
-        this.updateGameTimer(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
-        this.recordHistory(); // Important for Lag Comp
-
-        this.accumulator -= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
+    // Safety cap (prevents spiral of death if server lags)
+    const maxAccumulator = PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS * 10;
+    if (this.accumulator > maxAccumulator) {
+      console.warn(
+        `[Soccer] Physics accumulator capped: ${this.accumulator.toFixed(1)}ms`,
+      );
+      this.accumulator = maxAccumulator;
     }
 
-    // 3. Consume Network Accumulator (Strict 20Hz)
+    // === Fixed Timestep Physics (Target: 62.5 Hz) ===
+    while (this.accumulator >= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS) {
+      this.currentTick++;
+
+      // Update ball and player physics
+      this.updateBallPhysics(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
+      this.updateGameTimer(io, PHYSICS_CONSTANTS.FIXED_TIMESTEP_SEC);
+
+      // Record history for lag compensation
+      this.recordHistory();
+
+      this.accumulator -= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
+    }
+
+    // === Network Broadcast (Target: 20 Hz) ===
     if (this.networkAccumulator >= this.NETWORK_TICK_MS) {
-        this.broadcastBallState(io);
-        this.broadcastPlayerStates(io);
-        this.networkAccumulator -= this.NETWORK_TICK_MS;
+      this.broadcastBallState(io);
+      this.broadcastPlayerStates(io);
+      this.networkAccumulator -= this.NETWORK_TICK_MS;
     }
   }
 
   private static recordHistory() {
     const now = Date.now();
-    const players = Array.from(this.playerPhysics.values());
 
-    for (const player of players) {
-      let history = this.playerHistory.get(player.id);
-      if (!history) {
-        history = [];
-        this.playerHistory.set(player.id, history);
-      }
-      history.push({ x: player.x, y: player.y, timestamp: now });
-      if (history.length > 60) history.shift(); // 1 second
-    }
-
+    // Record ball history
     this.ballHistory.push({
       x: this.ballState.x,
       y: this.ballState.y,
       timestamp: now,
     });
-    if (this.ballHistory.length > 60) this.ballHistory.shift();
+
+    // Keep ~1 second of history (60 ticks at 60Hz)
+    while (this.ballHistory.length > 60) {
+      this.ballHistory.shift();
+    }
+
+    // Record player history
+    for (const [id, player] of this.playerPhysics) {
+      let history = this.playerHistory.get(id);
+      if (!history) {
+        history = [];
+        this.playerHistory.set(id, history);
+      }
+
+      history.push({
+        x: player.x,
+        y: player.y,
+        timestamp: now,
+      });
+
+      while (history.length > 60) {
+        history.shift();
+      }
+    }
+  }
+
+  private static findClosestHistoryState(
+    history: Array<{ x: number; y: number; timestamp: number }>,
+    targetTimestamp: number,
+  ): { x: number; y: number } | null {
+    if (history.length === 0) return null;
+
+    let closest = history[0];
+    if (!closest) return null;
+    let closestDiff = Math.abs(targetTimestamp - closest.timestamp);
+
+    for (const entry of history) {
+      const diff = Math.abs(targetTimestamp - entry.timestamp);
+      if (diff < closestDiff) {
+        closestDiff = diff;
+        closest = entry;
+      }
+    }
+
+    // Only use if within reasonable time window (500ms)
+    if (closestDiff > 500) {
+      return null;
+    }
+
+    return closest;
   }
 
   private static updateBallPhysics(io: Server, dt: number) {
@@ -708,54 +772,34 @@ export class SoccerService {
     const players = Array.from(this.playerPhysics.values());
 
     /**
-     * 1. Velocity Update (Acceleration and Drag)
+     * 1. Velocity Update & Integration (Acceleration, Drag, Move)
      */
     for (const player of players) {
       const input = this.playerInputs.get(player.id);
-      const isSpectator = player.team !== "red" && player.team !== "blue";
+      if (!input) continue;
 
-      // Calculate multipliers
+      // Skip spectators
+      if (player.team !== "red" && player.team !== "blue") continue;
+
+      // Calculate stat multipliers
       const speedStat = player.soccerStats?.speed ?? 0;
-      let speedMultiplier = 1.0 + speedStat * 0.1;
-      if (this.isPlayerSlowed(player.id)) {
-        speedMultiplier *= this.getSlowMultiplier();
-      }
-
-      // Acceleration (Semi-implicit Euler: update velocity before position)
-      if (input && !isSpectator) {
-        const accel = this.BASE_ACCEL * speedMultiplier;
-        if (input.up) player.vy -= accel * deltaTime;
-        if (input.down) player.vy += accel * deltaTime;
-        if (input.left) player.vx -= accel * deltaTime;
-        if (input.right) player.vx += accel * deltaTime;
-      }
-
-      // Drag (Exponential, frame-rate independent)
       const dribblingStat = player.soccerStats?.dribbling ?? 0;
-      // Dribbling reduces drag: 0 stat = 1.0x drag, 10 stat = 0.5x drag
-      const dragMultiplier = isSpectator
-        ? 1.0
-        : Math.max(0.5, 1.0 - dribblingStat * 0.05);
-      const dragFactor = Math.exp(
-        -this.PLAYER_DRAG * dragMultiplier * deltaTime,
-      );
-      player.vx *= dragFactor;
-      player.vy *= dragFactor;
+      let speedMultiplier = calculateSpeedMultiplier(speedStat);
+      const dragMultiplier = calculateDragMultiplier(dribblingStat);
 
-      // Speed Clamping
-      const maxSpeed = this.BASE_MAX_SPEED * speedMultiplier;
-      const currentSpeed = Math.sqrt(
-        player.vx * player.vx + player.vy * player.vy,
+      // Apply slow effect if active
+      if (SoccerService.isPlayerSlowed(player.id)) {
+        speedMultiplier *= SoccerService.getSlowMultiplier();
+      }
+
+      // Run deterministic physics (MUST match client exactly)
+      integratePlayer(
+        player,
+        input,
+        deltaTime,
+        dragMultiplier,
+        speedMultiplier,
       );
-      if (currentSpeed > maxSpeed && !isSpectator) {
-        const scale = maxSpeed / currentSpeed;
-        player.vx *= scale;
-        player.vy *= scale;
-      }
-      if (currentSpeed < 5) {
-        player.vx = 0;
-        player.vy = 0;
-      }
     }
 
     /**
@@ -810,11 +854,10 @@ export class SoccerService {
     }
 
     /**
-     * 3. Position Update and World/Wall Collisions
+     * 3. Map Boundary Clamping & Spectator Wall Collision
      */
     for (const player of players) {
-      player.x += player.vx * deltaTime;
-      player.y += player.vy * deltaTime;
+      // Note: Movement is already done in Step 1 via integratePlayer
 
       // Map Boundary Clamping (Keep all players within world bounds)
       player.x = Math.max(
