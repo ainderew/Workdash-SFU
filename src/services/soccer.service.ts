@@ -801,6 +801,9 @@ export class SoccerService {
         dragMultiplier,
         speedMultiplier,
       );
+
+      // Track the last input actually applied for reconciliation
+      this.lastProcessedSequence.set(player.id, input.sequence || 0);
     }
 
     /**
@@ -2216,7 +2219,6 @@ export class SoccerService {
       right: input.right,
       sequence,
     });
-    this.lastProcessedSequence.set(playerId, sequence);
   }
 
   public static removePlayerPhysics(playerId: string) {
