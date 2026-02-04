@@ -1011,6 +1011,7 @@ export class SoccerService {
       io.to("scene:SoccerMap").emit("players:physicsUpdate", {
         players: updates,
         timestamp: Date.now(),
+        tick: this.currentTick,
       });
     }
   }
@@ -2309,6 +2310,7 @@ export class SoccerService {
       this.ioInstance.to(socketId).emit("players:physicsUpdate", {
         players: updates,
         timestamp: Date.now(),
+        tick: this.currentTick,
       });
       console.log(
         `Sent initial physics state (${updates.length} players) to ${socketId}`,
