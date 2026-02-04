@@ -160,20 +160,11 @@ export class SoccerService {
   private static playerInputs: Map<
     string,
     {
-      queue: Array<{
-        up: boolean;
-        down: boolean;
-        left: boolean;
-        right: boolean;
-        sequence: number;
-      }>;
-      lastInput: {
-        up: boolean;
-        down: boolean;
-        left: boolean;
-        right: boolean;
-        sequence: number;
-      };
+      up: boolean;
+      down: boolean;
+      left: boolean;
+      right: boolean;
+      sequence: number;
     }
   > = new Map();
   private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
@@ -785,8 +776,8 @@ export class SoccerService {
      * 1. Velocity Update & Integration (Acceleration, Drag, Move)
      */
     for (const player of players) {
-      const inputEntry = this.playerInputs.get(player.id);
-      if (!inputEntry) continue;
+      const input = this.playerInputs.get(player.id);
+      if (!input) continue;
 
       // Skip spectators
       if (player.team !== "red" && player.team !== "blue") continue;
@@ -801,8 +792,6 @@ export class SoccerService {
       if (SoccerService.isPlayerSlowed(player.id)) {
         speedMultiplier *= SoccerService.getSlowMultiplier();
       }
-
-      const input = inputEntry.queue.shift() ?? inputEntry.lastInput;
 
       // Run deterministic physics (MUST match client exactly)
       integratePlayer(
@@ -2223,34 +2212,13 @@ export class SoccerService {
     },
   ) {
     const sequence = input.sequence || 0;
-    const entry = this.playerInputs.get(playerId);
-    const normalized = {
+    this.playerInputs.set(playerId, {
       up: input.up,
       down: input.down,
       left: input.left,
       right: input.right,
       sequence,
-    };
-
-    if (!entry) {
-      this.playerInputs.set(playerId, {
-        queue: [normalized],
-        lastInput: normalized,
-      });
-      return;
-    }
-
-    if (sequence <= entry.lastInput.sequence) {
-      return;
-    }
-
-    entry.queue.push(normalized);
-    entry.lastInput = normalized;
-
-    // Cap queue growth under bursty network conditions
-    if (entry.queue.length > 30) {
-      entry.queue.splice(0, entry.queue.length - 30);
-    }
+    });
   }
 
   public static removePlayerPhysics(playerId: string) {
