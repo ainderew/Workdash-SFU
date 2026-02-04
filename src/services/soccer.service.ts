@@ -297,6 +297,7 @@ export class SoccerService {
         keyBinding: skill.keyBinding,
         cooldownMs: skill.cooldownMs,
         durationMs: skill.durationMs,
+        serverEffect: skill.serverEffect,
         clientVisuals: skill.clientVisuals,
       }));
       callback(skills);
