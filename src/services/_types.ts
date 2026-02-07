@@ -138,6 +138,7 @@ export type BallKickData = {
   angle: number;
   timestamp?: number;
   sequence?: number;
+  localKickId?: number;
 };
 
 export type BallDribbleData = {

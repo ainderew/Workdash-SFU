@@ -81,6 +81,14 @@ interface BallHistoryState {
   timestamp: number;
 }
 
+interface PlayerInputState {
+  up: boolean;
+  down: boolean;
+  left: boolean;
+  right: boolean;
+  sequence: number;
+}
+
 export class SoccerService {
   private socket: Socket;
   private io: Server;
@@ -157,16 +165,8 @@ export class SoccerService {
   private static mapLoaded = false;
 
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
-  private static playerInputs: Map<
-    string,
-    {
-      up: boolean;
-      down: boolean;
-      left: boolean;
-      right: boolean;
-      sequence: number;
-    }
-  > = new Map();
+  private static playerInputs: Map<string, PlayerInputState> = new Map();
+  private static playerInputQueues: Map<string, PlayerInputState[]> = new Map();
   private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
   private static ballHistory: BallHistoryState[] = [];
   private static lastProcessedSequence: Map<string, number> = new Map();
@@ -430,6 +430,8 @@ export class SoccerService {
     // Broadcast kick event for sound/visual effects on other clients
     this.io.to("scene:SoccerMap").emit(GameEventEnums.BALL_KICKED, {
       kickerId: data.playerId,
+      localKickId:
+        typeof data.localKickId === "number" ? data.localKickId : undefined,
       sequence: ball.sequence, // Include sequence so clients know which kick this is
       ballX: ball.x,
       ballY: ball.y,
@@ -776,6 +778,14 @@ export class SoccerService {
      * 1. Velocity Update & Integration (Acceleration, Drag, Move)
      */
     for (const player of players) {
+      const queue = this.playerInputQueues.get(player.id);
+      if (queue && queue.length > 0) {
+        const nextInput = queue.shift();
+        if (nextInput) {
+          this.playerInputs.set(player.id, nextInput);
+        }
+      }
+
       const input = this.playerInputs.get(player.id);
       if (!input) continue;
 
@@ -2213,18 +2223,42 @@ export class SoccerService {
     },
   ) {
     const sequence = input.sequence || 0;
-    this.playerInputs.set(playerId, {
+    const normalizedInput: PlayerInputState = {
       up: input.up,
       down: input.down,
       left: input.left,
       right: input.right,
       sequence,
-    });
+    };
+
+    let queue = this.playerInputQueues.get(playerId);
+    if (!queue) {
+      queue = [];
+      this.playerInputQueues.set(playerId, queue);
+    }
+
+    const lastQueuedInput = queue[queue.length - 1];
+    if (lastQueuedInput && lastQueuedInput.sequence === sequence) {
+      return;
+    }
+
+    queue.push(normalizedInput);
+
+    // Keep about 2 seconds of queued inputs as a safety cap.
+    while (queue.length > 120) {
+      queue.shift();
+    }
+
+    // Bootstrap current input so movement starts immediately.
+    if (!this.playerInputs.has(playerId)) {
+      this.playerInputs.set(playerId, normalizedInput);
+    }
   }
 
   public static removePlayerPhysics(playerId: string) {
     this.playerPhysics.delete(playerId);
     this.playerInputs.delete(playerId);
+    this.playerInputQueues.delete(playerId);
   }
 
   public static isPlayerSlowed(playerId: string): boolean {
