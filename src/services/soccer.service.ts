@@ -124,8 +124,14 @@ export class SoccerService {
   private static lastTime = process.hrtime();
   private static accumulator = 0;
   private static networkAccumulator = 0;
-
-  private static updateInterval: NodeJS.Timeout | null = null;
+  private static loopImmediate: NodeJS.Immediate | null = null;
+  private static isPhysicsLoopRunning = false;
+  private static activeSoccerPlayers: Set<string> = new Set();
+  private static loopStartCount = 0;
+  private static diagnosticsLastLogAt = 0;
+  private static diagnosticsLastTick = 0;
+  private static readonly DIAGNOSTICS_LOG_INTERVAL_MS = 5000;
+  private static readonly DEBUG_RUNTIME_LOGS = false;
 
   private static readonly BASE_KICK_POWER = 1000;
   private static readonly KICK_COOLDOWN_MS = 300;
@@ -148,7 +154,8 @@ export class SoccerService {
     width: PHYSICS_CONSTANTS.WORLD_WIDTH, 
     height: PHYSICS_CONSTANTS.WORLD_HEIGHT 
   };
-  private static readonly MAX_DRIBBLE_DISTANCE = 300;
+  private static readonly MAX_DRIBBLE_DISTANCE = 180;
+  private static readonly MAX_DRIBBLE_TARGET_BALL_SPEED = 450;
 
   private static readonly SPECTATOR_SPAWN = { x: 250, y: 100 };
   private static readonly PLAYER_RADIUS = PHYSICS_CONSTANTS.PLAYER_RADIUS;
@@ -156,20 +163,17 @@ export class SoccerService {
   private static readonly BALL_KNOCKBACK = 0.6;
 
   private static readonly NETWORK_TICK_MS = PHYSICS_CONSTANTS.NETWORK_TICK_MS;
-  private static readonly PHYSICS_TICK_MS = PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
-  private static activeConnections = 0;
   private static lastKickTime = 0;
-  private static tickCount = 0; // Throttling counter
 
   private static collisionRects: CollisionRect[] = [];
   private static mapLoaded = false;
 
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
   private static playerInputs: Map<string, PlayerInputState> = new Map();
-  private static playerInputQueues: Map<string, PlayerInputState[]> = new Map();
   private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
   private static ballHistory: BallHistoryState[] = [];
   private static lastProcessedSequence: Map<string, number> = new Map();
+  private static playersTouchingBall: Set<string> = new Set();
   private static ioInstance: Server | null = null;
 
   private static goalZones: GoalZone[] = [];
@@ -226,7 +230,6 @@ export class SoccerService {
   constructor(socket: Socket, io: Server) {
     this.socket = socket;
     this.io = io;
-    SoccerService.activeConnections++;
 
     if (!SoccerService.ioInstance) {
       SoccerService.ioInstance = io;
@@ -238,10 +241,6 @@ export class SoccerService {
 
     if (!SoccerService.goalsLoaded) {
       SoccerService.loadGoalZones();
-    }
-
-    if (!SoccerService.updateInterval) {
-      SoccerService.startPhysicsLoop(io);
     }
   }
 
@@ -376,7 +375,7 @@ export class SoccerService {
     );
     const maxKickDistance = isMetaVisionActive ? 300 : 250; // Generous to account for lag
     if (distance > maxKickDistance) {
-      console.log(
+      SoccerService.runtimeLog(
         `[Soccer] Kick rejected: distance ${distance.toFixed(0)} > ${maxKickDistance}`,
       );
       return;
@@ -423,7 +422,7 @@ export class SoccerService {
     kickerPhysics.vx += knockbackVx;
     kickerPhysics.vy += knockbackVy;
 
-    console.log(
+    SoccerService.runtimeLog(
       `[Soccer] Kick by ${data.playerId}: seq=${ball.sequence}, vel=(${ball.vx.toFixed(0)}, ${ball.vy.toFixed(0)})`,
     );
 
@@ -465,6 +464,15 @@ export class SoccerService {
     if (!playerPhysics) return;
 
     const ballState = SoccerService.ballState;
+    const ballSpeed = Math.sqrt(
+      ballState.vx * ballState.vx + ballState.vy * ballState.vy,
+    );
+
+    // Ignore dribble pulls while the ball is already travelling quickly.
+    // This avoids abrupt mid-flight velocity overrides that look like skipping.
+    if (ballSpeed > SoccerService.MAX_DRIBBLE_TARGET_BALL_SPEED) {
+      return;
+    }
 
     // 2. USE SERVER COORDINATES, NOT CLIENT DATA
     const dx = ballState.x - playerPhysics.x;
@@ -489,25 +497,95 @@ export class SoccerService {
     ballState.lastTouchTimestamp = Date.now();
     ballState.isMoving = true;
 
-    console.log(`Ball dribbled by ${data.playerId}`);
+    SoccerService.runtimeLog(`Ball dribbled by ${data.playerId}`);
     this.broadcastBallState();
   }
 
 
 
   private static startPhysicsLoop(io: Server) {
+    if (this.isPhysicsLoopRunning) {
+      return;
+    }
+
+    this.isPhysicsLoopRunning = true;
+    this.loopStartCount++;
     this.lastTime = process.hrtime();
     this.accumulator = 0;
     this.networkAccumulator = 0;
+    this.diagnosticsLastLogAt = Date.now();
+    this.diagnosticsLastTick = this.currentTick;
 
     // Run physics loop
     // Using setImmediate for more consistent timing than setInterval(0)
     const loop = () => {
+      if (!this.isPhysicsLoopRunning) {
+        this.loopImmediate = null;
+        return;
+      }
       this.serverTick(io);
-      setImmediate(loop);
+      this.loopImmediate = setImmediate(loop);
     };
 
-    setImmediate(loop);
+    this.loopImmediate = setImmediate(loop);
+    console.log(
+      `[Soccer] Started physics loop #${this.loopStartCount} (activePlayers=${this.activeSoccerPlayers.size})`,
+    );
+  }
+
+  private static stopPhysicsLoop(reason: string) {
+    if (!this.isPhysicsLoopRunning) {
+      return;
+    }
+
+    this.isPhysicsLoopRunning = false;
+    if (this.loopImmediate) {
+      clearImmediate(this.loopImmediate);
+      this.loopImmediate = null;
+    }
+
+    this.accumulator = 0;
+    this.networkAccumulator = 0;
+
+    console.log(`[Soccer] Stopped physics loop (${reason})`);
+  }
+
+  private static syncPhysicsLoopLifecycle(reason: string) {
+    if (!this.ioInstance) {
+      return;
+    }
+
+    if (this.activeSoccerPlayers.size > 0) {
+      this.startPhysicsLoop(this.ioInstance);
+      return;
+    }
+
+    this.stopPhysicsLoop(reason);
+  }
+
+  private static runtimeLog(message?: unknown, ...optionalParams: unknown[]) {
+    if (!this.DEBUG_RUNTIME_LOGS) {
+      return;
+    }
+    console.log(message, ...optionalParams);
+  }
+
+  private static logLoopDiagnostics() {
+    const now = Date.now();
+    const elapsed = now - this.diagnosticsLastLogAt;
+    if (elapsed < this.DIAGNOSTICS_LOG_INTERVAL_MS) {
+      return;
+    }
+
+    const tickDelta = this.currentTick - this.diagnosticsLastTick;
+    const tickRateHz = elapsed > 0 ? (tickDelta * 1000) / elapsed : 0;
+
+    console.log(
+      `[Soccer] Loop diagnostics: running=${this.isPhysicsLoopRunning ? 1 : 0}, activePlayers=${this.activeSoccerPlayers.size}, tickRate=${tickRateHz.toFixed(1)}Hz, tick=${this.currentTick}`,
+    );
+
+    this.diagnosticsLastLogAt = now;
+    this.diagnosticsLastTick = this.currentTick;
   }
 
   private static serverTick(io: Server) {
@@ -549,6 +627,8 @@ export class SoccerService {
       this.broadcastPlayerStates(io);
       this.networkAccumulator -= this.NETWORK_TICK_MS;
     }
+
+    this.logLoopDiagnostics();
   }
 
   private static recordHistory() {
@@ -672,7 +752,7 @@ export class SoccerService {
           ball.x += normal.x * (penetration + 1);
           ball.y += normal.y * (penetration + 1);
 
-          console.log(
+          this.runtimeLog(
             `Ball bounced off wall at (${ball.x.toFixed(0)}, ${ball.y.toFixed(0)})`,
           );
           break; // Only one wall collision per frame
@@ -751,7 +831,7 @@ export class SoccerService {
         ball.vx = 0;
         ball.vy = 0;
         ball.isMoving = false;
-        console.log("Ball stopped moving");
+        this.runtimeLog("Ball stopped moving");
       }
     }
 
@@ -778,14 +858,6 @@ export class SoccerService {
      * 1. Velocity Update & Integration (Acceleration, Drag, Move)
      */
     for (const player of players) {
-      const queue = this.playerInputQueues.get(player.id);
-      if (queue && queue.length > 0) {
-        const nextInput = queue.shift();
-        if (nextInput) {
-          this.playerInputs.set(player.id, nextInput);
-        }
-      }
-
       const input = this.playerInputs.get(player.id);
       if (!input) continue;
 
@@ -856,6 +928,7 @@ export class SoccerService {
     /**
      * Ball to player collision knockback
      */
+    const touchingPlayers = new Set<string>();
     for (const player of players) {
       const dx = this.ballState.x - player.x;
       const dy = this.ballState.y - player.y;
@@ -863,9 +936,14 @@ export class SoccerService {
       const minDistance = this.BALL_RADIUS + player.radius;
 
       if (distance < minDistance && this.ballState.isMoving) {
-        this.handleBallPlayerKnockback(player, dx, dy, distance);
+        touchingPlayers.add(player.id);
+        // Only apply knockback when contact starts, not every tick while overlapping.
+        if (!this.playersTouchingBall.has(player.id)) {
+          this.handleBallPlayerKnockback(player, dx, dy, distance);
+        }
       }
     }
+    this.playersTouchingBall = touchingPlayers;
 
     /**
      * 3. Map Boundary Clamping & Spectator Wall Collision
@@ -931,8 +1009,19 @@ export class SoccerService {
     dy: number,
     distance: number,
   ) {
-    const nx = dx / distance;
-    const ny = dy / distance;
+    let nx: number;
+    let ny: number;
+    if (distance <= 0.0001) {
+      // Deterministic fallback when positions overlap exactly.
+      // Avoids NaN propagation that causes teleports/rubberbanding.
+      const p1BeforeP2 = p1.id < p2.id;
+      nx = p1BeforeP2 ? 1 : -1;
+      ny = 0;
+      distance = 0;
+    } else {
+      nx = dx / distance;
+      ny = dy / distance;
+    }
 
     // Separate players push Apart
     const overlap = p1.radius + p2.radius - distance;
@@ -963,6 +1052,7 @@ export class SoccerService {
     );
 
     if (ballSpeed < 100) return;
+    if (distance <= 0.0001) return;
     const nx = -dx / distance;
     const ny = -dy / distance;
 
@@ -978,7 +1068,7 @@ export class SoccerService {
     player.vx += nx * knockbackMagnitude;
     player.vy += ny * knockbackMagnitude;
 
-    console.log(
+    this.runtimeLog(
       `Player ${player.id} knocked back by ball: ${knockbackMagnitude.toFixed(0)} px/s${isPowerShot ? " (POWER SHOT)" : ""}`,
     );
   }
@@ -1036,6 +1126,16 @@ export class SoccerService {
     playerRadius: number,
   ) {
     const ball = this.ballState;
+    if (distance <= 0.0001) {
+      // Use velocity direction as a stable fallback for exact overlap.
+      const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+      if (speed <= 0.0001) {
+        return;
+      }
+      dx = ball.vx / speed;
+      dy = ball.vy / speed;
+      distance = 1;
+    }
 
     const nx = dx / distance;
     const ny = dy / distance;
@@ -1057,7 +1157,7 @@ export class SoccerService {
     ball.vy *= bounceDamping;
 
     if (isPowerShot) {
-      console.log(
+      this.runtimeLog(
         `Ball bounced off player with power shot retention (${bounceDamping * 100}%)`,
       );
     }
@@ -1080,7 +1180,7 @@ export class SoccerService {
         };
         stats.interceptions++;
         this.playerMatchStats.set(playerId, stats);
-        console.log(
+        this.runtimeLog(
           `Interception recorded for ${playerId}! Total: ${stats.interceptions}`,
         );
       }
@@ -1091,7 +1191,7 @@ export class SoccerService {
     ball.lastTouchTimestamp = Date.now();
 
     const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
-    console.log(
+    this.runtimeLog(
       `Ball intercepted by ${playerId}, bounced at ${speed.toFixed(0)}px/s`,
     );
 
@@ -1995,18 +2095,13 @@ export class SoccerService {
   }
 
   private cleanup() {
-    SoccerService.activeConnections--;
-
     if (SoccerService.ballState.lastTouchId === this.socket.id) {
       SoccerService.ballState.lastTouchId = null;
       console.log(`Ball ownership cleared for ${this.socket.id}`);
     }
 
-    if (SoccerService.activeConnections === 0 && SoccerService.updateInterval) {
-      clearInterval(SoccerService.updateInterval);
-      SoccerService.updateInterval = null;
-      console.log("Stopped soccer ball physics loop (no active connections)");
-    }
+    // Idempotent: GameService also removes SoccerMap physics on disconnect.
+    SoccerService.removePlayerPhysics(this.socket.id);
   }
 
   private static checkBallRectCollision(
@@ -2210,6 +2305,21 @@ export class SoccerService {
       team: playerState?.team || null,
       ...state,
     });
+
+    // Ensure physics integration runs even before the first input packet arrives.
+    // This preserves drag/knockback behavior from server-side interactions.
+    if (!this.playerInputs.has(playerId)) {
+      this.playerInputs.set(playerId, {
+        up: false,
+        down: false,
+        left: false,
+        right: false,
+        sequence: this.lastProcessedSequence.get(playerId) || 0,
+      });
+    }
+
+    this.activeSoccerPlayers.add(playerId);
+    this.syncPhysicsLoopLifecycle("player joined SoccerMap");
   }
 
   public static updatePlayerInput(
@@ -2231,34 +2341,44 @@ export class SoccerService {
       sequence,
     };
 
-    let queue = this.playerInputQueues.get(playerId);
-    if (!queue) {
-      queue = [];
-      this.playerInputQueues.set(playerId, queue);
+    // Drop stale inputs that arrived out-of-order relative to what the server
+    // has already applied for this player.
+    if (sequence > 0) {
+      const lastProcessed = this.lastProcessedSequence.get(playerId) || 0;
+      if (sequence <= lastProcessed) {
+        return;
+      }
     }
 
-    const lastQueuedInput = queue[queue.length - 1];
-    if (lastQueuedInput && lastQueuedInput.sequence === sequence) {
-      return;
+    const currentInput = this.playerInputs.get(playerId);
+    if (currentInput) {
+      if (currentInput.sequence === sequence) {
+        return;
+      }
+      if (
+        sequence > 0 &&
+        currentInput.sequence > 0 &&
+        sequence < currentInput.sequence
+      ) {
+        return;
+      }
     }
 
-    queue.push(normalizedInput);
-
-    // Keep about 2 seconds of queued inputs as a safety cap.
-    while (queue.length > 120) {
-      queue.shift();
-    }
-
-    // Bootstrap current input so movement starts immediately.
-    if (!this.playerInputs.has(playerId)) {
-      this.playerInputs.set(playerId, normalizedInput);
-    }
+    this.playerInputs.set(playerId, normalizedInput);
   }
 
   public static removePlayerPhysics(playerId: string) {
+    const wasActivePlayer = this.activeSoccerPlayers.delete(playerId);
+
     this.playerPhysics.delete(playerId);
     this.playerInputs.delete(playerId);
-    this.playerInputQueues.delete(playerId);
+    this.playersTouchingBall.delete(playerId);
+    this.playerHistory.delete(playerId);
+    this.lastProcessedSequence.delete(playerId);
+
+    if (wasActivePlayer) {
+      this.syncPhysicsLoopLifecycle("player left SoccerMap");
+    }
   }
 
   public static isPlayerSlowed(playerId: string): boolean {

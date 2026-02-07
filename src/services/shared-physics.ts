@@ -30,13 +30,13 @@ export const PHYSICS_CONSTANTS = {
   FIXED_TIMESTEP_SEC: 0.016, // Exactly 16/1000
 
   // Network
-  NETWORK_TICK_MS: 50, // 20 Hz broadcast rate
+  NETWORK_TICK_MS: 25, // 40 Hz broadcast rate
 
   // Thresholds
   VELOCITY_STOP_THRESHOLD: 10, // Ball considered stopped below this
   POSITION_SNAP_THRESHOLD: 200, // Teleport if error exceeds this
-  POSITION_CORRECT_THRESHOLD: 5, // Ignore errors below this
-  VELOCITY_CORRECT_THRESHOLD: 20, // Ignore velocity errors below this
+  POSITION_CORRECT_THRESHOLD: 10, // Ignore errors below this
+  VELOCITY_CORRECT_THRESHOLD: 40, // Ignore velocity errors below this
 } as const;
 
 // Type definitions
