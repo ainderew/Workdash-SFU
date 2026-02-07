@@ -877,13 +877,12 @@ export class SoccerService {
     for (const player of players) {
       const queuedInputs = this.playerInputQueues.get(player.id);
       if (queuedInputs && queuedInputs.length > 0) {
-        const nextInput = queuedInputs.shift();
+        // Apply the most recent queued input for responsiveness and drop stale backlog.
+        const nextInput = queuedInputs[queuedInputs.length - 1];
         if (nextInput) {
           this.playerInputs.set(player.id, nextInput);
         }
-        if (queuedInputs.length === 0) {
-          this.playerInputQueues.delete(player.id);
-        }
+        this.playerInputQueues.delete(player.id);
       }
 
       const input = this.playerInputs.get(player.id);
