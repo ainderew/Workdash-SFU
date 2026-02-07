@@ -62,6 +62,31 @@ export class GameService {
       },
     );
 
+    this.socket.on(
+      "playerInputBatch",
+      (
+        payload:
+          | {
+              inputs: Array<{
+                up: boolean;
+                down: boolean;
+                left: boolean;
+                right: boolean;
+                sequence?: number;
+              }>;
+            }
+          | Array<{
+              up: boolean;
+              down: boolean;
+              left: boolean;
+              right: boolean;
+              sequence?: number;
+            }>,
+      ) => {
+        this.handlePlayerInputBatch(payload);
+      },
+    );
+
     // Legacy: Keep this for non-physics maps (like MainMap)
     this.socket.on("playerMovement", (data: PlayerMovementData) => {
       this.handlePlayerMovement(data);
@@ -111,6 +136,37 @@ export class GameService {
     if (!playerState || playerState.currentScene !== "SoccerMap") return;
 
     SoccerService.updatePlayerInput(this.socket.id, input);
+  }
+
+  private handlePlayerInputBatch(
+    payload:
+      | {
+          inputs: Array<{
+            up: boolean;
+            down: boolean;
+            left: boolean;
+            right: boolean;
+            sequence?: number;
+          }>;
+        }
+      | Array<{
+          up: boolean;
+          down: boolean;
+          left: boolean;
+          right: boolean;
+          sequence?: number;
+        }>,
+  ) {
+    const playerState = playerPositions.get(this.socket.id);
+    if (!playerState || playerState.currentScene !== "SoccerMap") return;
+
+    const inputs = Array.isArray(payload) ? payload : payload?.inputs;
+    if (!Array.isArray(inputs) || inputs.length === 0) return;
+
+    const boundedInputs = inputs.slice(0, 180);
+    for (const input of boundedInputs) {
+      SoccerService.updatePlayerInput(this.socket.id, input);
+    }
   }
 
   // ==========================================

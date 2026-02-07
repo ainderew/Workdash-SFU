@@ -1,6 +1,6 @@
-# SoccerMap Multiplayer Physics Rework Plan
+# SoccerMap Multiplayer Physics Rework Plan and Status
 
-Last updated: 2026-02-07
+Last updated: 2026-02-08
 
 ## Objective
 
@@ -11,6 +11,47 @@ Make SoccerMap movement feel stable at normal latency (for example 40-70ms RTT) 
 - collisions, knockback, and skills
 
 The client should only predict for responsiveness, then reconcile cleanly to server truth.
+
+## Implementation Status (2026-02-08)
+
+The following lag/rubberbanding items are now implemented in code:
+
+1. Input downsampling removed:
+- Client now sends all fixed-tick inputs in ordered batches (`playerInputBatch`) instead of dropping to latest-only state.
+- Files: `/Users/AndrewPinon/projects/workdash/src/game/scenes/SoccerMap.ts`, `/Users/AndrewPinon/projects/workdash-media-server/src/services/game.service.ts`.
+
+2. Input send decoupled from render FPS:
+- Soccer input flush now runs on its own timer (8ms cadence), not per-frame `update()`.
+- File: `/Users/AndrewPinon/projects/workdash/src/game/scenes/SoccerMap.ts`.
+
+3. Server input application hardened:
+- Server now stores an ordered per-player input queue and applies one queued input each authoritative tick.
+- Stale/duplicate sequences are dropped against `lastProcessedSequence`.
+- File: `/Users/AndrewPinon/projects/workdash-media-server/src/services/soccer.service.ts`.
+
+4. Local prediction now models authoritative interaction forces:
+- Local player-side collision/ball knockback prediction is enabled.
+- Ball knockback prediction is edge-triggered (contact start only), matching server behavior and preventing repeated local impulse stacking.
+- File: `/Users/AndrewPinon/projects/workdash/src/game/player/player.ts`.
+
+5. Reconciliation smoothing tightened:
+- Reconciliation now uses dynamic correction thresholds and sequence-lag-aware blending to reduce visible pullbacks while moving.
+- Startup grace is reduced to avoid long deferred corrections.
+- File: `/Users/AndrewPinon/projects/workdash/src/game/player/player.ts`.
+
+6. Camera follow latency reduced (non-soccer base scenes):
+- Base camera follow lerp increased for faster camera convergence.
+- File: `/Users/AndrewPinon/projects/workdash/src/game/scenes/BaseGameScene.ts`.
+
+7. Movement feel retuned for lower perceived sluggishness:
+- Shared authoritative constants updated: higher accel/drag and adjusted correction thresholds.
+- File pair (kept synchronized):
+- `/Users/AndrewPinon/projects/workdash/src/game/soccer/shared-physics.ts`
+- `/Users/AndrewPinon/projects/workdash-media-server/src/services/shared-physics.ts`
+
+8. Server loop pacing improved:
+- Replaced tight recursive `setImmediate` loop with a drift-corrected monotonic scheduler (`setTimeout` + hrtime target).
+- File: `/Users/AndrewPinon/projects/workdash-media-server/src/services/soccer.service.ts`.
 
 ## Current Implementation Audit (Server + Client)
 

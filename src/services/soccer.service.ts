@@ -124,7 +124,8 @@ export class SoccerService {
   private static lastTime = process.hrtime();
   private static accumulator = 0;
   private static networkAccumulator = 0;
-  private static loopImmediate: NodeJS.Immediate | null = null;
+  private static loopTimer: NodeJS.Timeout | null = null;
+  private static nextLoopRunAtMs = 0;
   private static isPhysicsLoopRunning = false;
   private static activeSoccerPlayers: Set<string> = new Set();
   private static loopStartCount = 0;
@@ -146,7 +147,7 @@ export class SoccerService {
   private static readonly BALL_RADIUS = PHYSICS_CONSTANTS.BALL_RADIUS;
   /**
    * Physics runs at 60Hz (16.6ms)
-   * Network broadcasts are throttled to 20Hz
+   * Network broadcasts are throttled to ~62.5Hz
    */
   private static readonly UPDATE_INTERVAL_MS = PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
   private static readonly VELOCITY_THRESHOLD = PHYSICS_CONSTANTS.VELOCITY_STOP_THRESHOLD;
@@ -170,9 +171,11 @@ export class SoccerService {
 
   private static playerPhysics: Map<string, PlayerPhysicsState> = new Map();
   private static playerInputs: Map<string, PlayerInputState> = new Map();
+  private static playerInputQueues: Map<string, PlayerInputState[]> = new Map();
   private static playerHistory: Map<string, PlayerHistoryState[]> = new Map();
   private static ballHistory: BallHistoryState[] = [];
   private static lastProcessedSequence: Map<string, number> = new Map();
+  private static readonly MAX_INPUT_QUEUE_SIZE = 180;
   private static playersTouchingBall: Set<string> = new Set();
   private static ioInstance: Server | null = null;
 
@@ -516,18 +519,28 @@ export class SoccerService {
     this.diagnosticsLastLogAt = Date.now();
     this.diagnosticsLastTick = this.currentTick;
 
-    // Run physics loop
-    // Using setImmediate for more consistent timing than setInterval(0)
-    const loop = () => {
+    // Drift-corrected scheduler on monotonic time.
+    const runLoop = () => {
       if (!this.isPhysicsLoopRunning) {
-        this.loopImmediate = null;
+        this.loopTimer = null;
         return;
       }
+
       this.serverTick(io);
-      this.loopImmediate = setImmediate(loop);
+      this.nextLoopRunAtMs += this.UPDATE_INTERVAL_MS;
+      const now = this.getMonotonicMs();
+
+      // If we are far behind (GC pause/load spike), resync target schedule.
+      if (this.nextLoopRunAtMs < now - this.UPDATE_INTERVAL_MS * 2) {
+        this.nextLoopRunAtMs = now + this.UPDATE_INTERVAL_MS;
+      }
+
+      const delay = Math.max(0, this.nextLoopRunAtMs - now);
+      this.loopTimer = setTimeout(runLoop, delay);
     };
 
-    this.loopImmediate = setImmediate(loop);
+    this.nextLoopRunAtMs = this.getMonotonicMs() + this.UPDATE_INTERVAL_MS;
+    this.loopTimer = setTimeout(runLoop, this.UPDATE_INTERVAL_MS);
     console.log(
       `[Soccer] Started physics loop #${this.loopStartCount} (activePlayers=${this.activeSoccerPlayers.size})`,
     );
@@ -539,9 +552,9 @@ export class SoccerService {
     }
 
     this.isPhysicsLoopRunning = false;
-    if (this.loopImmediate) {
-      clearImmediate(this.loopImmediate);
-      this.loopImmediate = null;
+    if (this.loopTimer) {
+      clearTimeout(this.loopTimer);
+      this.loopTimer = null;
     }
 
     this.accumulator = 0;
@@ -568,6 +581,10 @@ export class SoccerService {
       return;
     }
     console.log(message, ...optionalParams);
+  }
+
+  private static getMonotonicMs(): number {
+    return Number(process.hrtime.bigint() / 1000000n);
   }
 
   private static logLoopDiagnostics() {
@@ -621,7 +638,7 @@ export class SoccerService {
       this.accumulator -= PHYSICS_CONSTANTS.FIXED_TIMESTEP_MS;
     }
 
-    // === Network Broadcast (Target: 20 Hz) ===
+    // === Network Broadcast (Target cadence from NETWORK_TICK_MS) ===
     if (this.networkAccumulator >= this.NETWORK_TICK_MS) {
       this.broadcastBallState(io);
       this.broadcastPlayerStates(io);
@@ -858,6 +875,17 @@ export class SoccerService {
      * 1. Velocity Update & Integration (Acceleration, Drag, Move)
      */
     for (const player of players) {
+      const queuedInputs = this.playerInputQueues.get(player.id);
+      if (queuedInputs && queuedInputs.length > 0) {
+        const nextInput = queuedInputs.shift();
+        if (nextInput) {
+          this.playerInputs.set(player.id, nextInput);
+        }
+        if (queuedInputs.length === 0) {
+          this.playerInputQueues.delete(player.id);
+        }
+      }
+
       const input = this.playerInputs.get(player.id);
       if (!input) continue;
 
@@ -885,7 +913,9 @@ export class SoccerService {
       );
 
       // Track the last input actually applied for reconciliation
-      this.lastProcessedSequence.set(player.id, input.sequence || 0);
+      if ((input.sequence || 0) > 0) {
+        this.lastProcessedSequence.set(player.id, input.sequence);
+      }
     }
 
     /**
@@ -2308,15 +2338,14 @@ export class SoccerService {
 
     // Ensure physics integration runs even before the first input packet arrives.
     // This preserves drag/knockback behavior from server-side interactions.
-    if (!this.playerInputs.has(playerId)) {
-      this.playerInputs.set(playerId, {
-        up: false,
-        down: false,
-        left: false,
-        right: false,
-        sequence: this.lastProcessedSequence.get(playerId) || 0,
-      });
-    }
+    this.playerInputs.set(playerId, {
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+      sequence: this.lastProcessedSequence.get(playerId) || 0,
+    });
+    this.playerInputQueues.set(playerId, []);
 
     this.activeSoccerPlayers.add(playerId);
     this.syncPhysicsLoopLifecycle("player joined SoccerMap");
@@ -2341,30 +2370,54 @@ export class SoccerService {
       sequence,
     };
 
+    const currentInput = this.playerInputs.get(playerId);
+    if (sequence <= 0) {
+      // Legacy fallback: no ordered sequence available, treat as latest state.
+      this.playerInputs.set(playerId, normalizedInput);
+      return;
+    }
+
     // Drop stale inputs that arrived out-of-order relative to what the server
     // has already applied for this player.
-    if (sequence > 0) {
-      const lastProcessed = this.lastProcessedSequence.get(playerId) || 0;
-      if (sequence <= lastProcessed) {
-        return;
+    const lastProcessed = this.lastProcessedSequence.get(playerId) || 0;
+    if (sequence <= lastProcessed) {
+      return;
+    }
+
+    if (currentInput && currentInput.sequence >= sequence) {
+      return;
+    }
+
+    const queue = this.playerInputQueues.get(playerId) || [];
+    if (queue.some((queued) => queued.sequence === sequence)) {
+      return;
+    }
+
+    const lastQueued = queue.length > 0 ? queue[queue.length - 1] : null;
+    if (lastQueued && sequence > lastQueued.sequence) {
+      queue.push(normalizedInput);
+    } else if (queue.length === 0) {
+      queue.push(normalizedInput);
+    } else {
+      let inserted = false;
+      for (let i = 0; i < queue.length; i++) {
+        const queued = queue[i];
+        if (queued && sequence < queued.sequence) {
+          queue.splice(i, 0, normalizedInput);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) {
+        queue.push(normalizedInput);
       }
     }
 
-    const currentInput = this.playerInputs.get(playerId);
-    if (currentInput) {
-      if (currentInput.sequence === sequence) {
-        return;
-      }
-      if (
-        sequence > 0 &&
-        currentInput.sequence > 0 &&
-        sequence < currentInput.sequence
-      ) {
-        return;
-      }
+    if (queue.length > this.MAX_INPUT_QUEUE_SIZE) {
+      queue.splice(0, queue.length - this.MAX_INPUT_QUEUE_SIZE);
     }
 
-    this.playerInputs.set(playerId, normalizedInput);
+    this.playerInputQueues.set(playerId, queue);
   }
 
   public static removePlayerPhysics(playerId: string) {
@@ -2372,6 +2425,7 @@ export class SoccerService {
 
     this.playerPhysics.delete(playerId);
     this.playerInputs.delete(playerId);
+    this.playerInputQueues.delete(playerId);
     this.playersTouchingBall.delete(playerId);
     this.playerHistory.delete(playerId);
     this.lastProcessedSequence.delete(playerId);
